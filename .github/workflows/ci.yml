@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ubuntu:
+    name: Ubuntu / gcc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev cmake
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DAUDD_BUILD_EXAMPLES=ON \
+              -DAUDD_BUILD_TESTS=ON
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  macos:
+    name: macOS / clang
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          brew install curl cmake
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DAUDD_BUILD_EXAMPLES=ON \
+              -DAUDD_BUILD_TESTS=ON \
+              -DCMAKE_PREFIX_PATH="$(brew --prefix curl)"
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
