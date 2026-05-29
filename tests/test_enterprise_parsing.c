@@ -50,6 +50,38 @@ void test_thumbnail_url(void)
     audd_enterprise_result_free(r);
 }
 
+void test_song_without_score_parses(void)
+{
+    /* Enterprise legitimately returns songs with no score (and no
+     * isrc/upc/label). Parsing must succeed; missing fields default. */
+    const char *json = "[{\"songs\":[{"
+        "\"artist\":\"A\",\"title\":\"T\",\"album\":\"Alb\","
+        "\"release_date\":\"2020-01-01\",\"song_link\":\"https://lis.tn/x\""
+    "}],\"offset\":\"0:00\"}]";
+    cJSON *obj = cJSON_Parse(json);
+    TEST_ASSERT_NOT_NULL(obj);
+    audd_enterprise_result_t *r = audd_enterprise_from_json(obj);
+    cJSON_Delete(obj);
+
+    /* No error path exists: a valid response always yields a result. */
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_EQUAL_INT(1, (int)audd_enterprise_result_count(r));
+
+    const audd_enterprise_match_t *m = audd_enterprise_result_at(r, 0);
+    TEST_ASSERT_NOT_NULL(m);
+    /* score absent -> defaults to 0, not an error */
+    TEST_ASSERT_EQUAL_INT(0, audd_enterprise_match_get_score(m));
+    /* absent string fields -> NULL */
+    TEST_ASSERT_NULL(audd_enterprise_match_get_isrc(m));
+    TEST_ASSERT_NULL(audd_enterprise_match_get_upc(m));
+    TEST_ASSERT_NULL(audd_enterprise_match_get_label(m));
+    /* present fields still read */
+    TEST_ASSERT_EQUAL_STRING("A", audd_enterprise_match_get_artist(m));
+    TEST_ASSERT_EQUAL_STRING("T", audd_enterprise_match_get_title(m));
+
+    audd_enterprise_result_free(r);
+}
+
 void test_empty_result(void)
 {
     cJSON *obj = cJSON_CreateArray();
@@ -66,6 +98,7 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_flattens_chunks);
     RUN_TEST(test_thumbnail_url);
+    RUN_TEST(test_song_without_score_parses);
     RUN_TEST(test_empty_result);
     return UNITY_END();
 }
