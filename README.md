@@ -81,9 +81,16 @@ audd_recognize(client, "/path/to/clip.mp3", NULL, &r);
 
 For longer audio files, use `audd_recognize_enterprise`,
 which returns multiple matches across the file's chunks. Each match
-carries the same core tags plus `score`, `start_offset`, `end_offset`,
-`isrc`, `upc`. Access to `isrc`, `upc`, and `score` requires a Startup
-plan or higher — [contact us](mailto:api@audd.io) for enterprise features.
+carries the same core tags plus `score`, `start_seconds`, `end_seconds`,
+`start_offset`, `end_offset`, `isrc`, `upc`. Access to `isrc`, `upc`, and
+`score` requires a Startup plan or higher — [contact us](mailto:api@audd.io)
+for enterprise features.
+
+`start_seconds` and `end_seconds` tell you where the match plays in your
+file, in seconds; they are `-1.0` when unknown. They are precise because the
+SDK requests accurate offsets by default (set `opts.accurate_offsets = 0` to
+opt out). `start_offset` and `end_offset` are the raw fragment-relative
+milliseconds behind them.
 
 ```c
 audd_enterprise_options_t opts = audd_enterprise_options_default();
@@ -94,12 +101,12 @@ audd_recognize_enterprise(client, "/long/file.mp3", &opts, &r);
 
 for (size_t i = 0; i < audd_enterprise_result_count(r); ++i) {
     const audd_enterprise_match_t *m = audd_enterprise_result_at(r, i);
-    printf("[%d] %s — %s  (%d-%d)\n",
+    printf("[%d] %s — %s  (%.1fs-%.1fs)\n",
            audd_enterprise_match_get_score(m),
            audd_enterprise_match_get_artist(m),
            audd_enterprise_match_get_title(m),
-           audd_enterprise_match_get_start_offset(m),
-           audd_enterprise_match_get_end_offset(m));
+           audd_enterprise_match_get_start_seconds(m),
+           audd_enterprise_match_get_end_seconds(m));
 }
 audd_enterprise_result_free(r);
 ```

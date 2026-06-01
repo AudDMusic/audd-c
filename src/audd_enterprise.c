@@ -2,6 +2,8 @@
 #include "audd_internal.h"
 #include "audd.h"
 
+#include <ctype.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "../vendor/cJSON/cJSON.h"
@@ -19,6 +21,10 @@ struct audd_enterprise_match {
     char *song_link;
     int   start_offset;
     int   end_offset;
+    /* Position of the match in the user's file, in seconds. -1.0 = unknown
+     * (the chunk carried no usable offset). Real file positions are >= 0. */
+    double start_seconds;
+    double end_seconds;
     char *thumbnail_url;          /* lazy */
     char *streaming_urls[5];      /* lazy */
     int   thumb_lazy;
@@ -33,6 +39,50 @@ struct audd_enterprise_result {
 static char *strdup_or_null(const char *s)
 {
     return (s == NULL) ? NULL : audd_strdup(s);
+}
+
+/* Parse a chunk offset string into seconds. Accepts "SS", "MM:SS",
+ * "HH:MM:SS", or a bare number. Returns -1.0 on NULL/empty/unparseable.
+ * Never crashes. */
+static double audd_offset_to_seconds(const char *offset)
+{
+    if (offset == NULL) return -1.0;
+    while (*offset == ' ' || *offset == '\t') offset++;
+    if (*offset == '\0') return -1.0;
+
+    /* Bare number (no colon): seconds, possibly fractional. */
+    if (strchr(offset, ':') == NULL) {
+        char *end = NULL;
+        double v = strtod(offset, &end);
+        if (end == offset) return -1.0;
+        while (*end == ' ' || *end == '\t') end++;
+        if (*end != '\0') return -1.0;
+        return (v < 0.0) ? -1.0 : v;
+    }
+
+    /* Colon-separated: up to three components, last one may be fractional. */
+    double parts[3];
+    int n = 0;
+    const char *p = offset;
+    while (n < 3) {
+        char *end = NULL;
+        double v = strtod(p, &end);
+        if (end == p) return -1.0;        /* empty component */
+        if (v < 0.0) return -1.0;
+        parts[n++] = v;
+        p = end;
+        if (*p == ':') { p++; continue; }
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '\0') break;
+        return -1.0;                       /* trailing garbage */
+    }
+    if (*p == ':') return -1.0;            /* more than three components */
+
+    double seconds = 0.0;
+    for (int i = 0; i < n; ++i) {
+        seconds = seconds * 60.0 + parts[i];
+    }
+    return seconds;
 }
 
 static void match_free_inner(audd_enterprise_match_t *m)
@@ -51,9 +101,11 @@ static void match_free_inner(audd_enterprise_match_t *m)
     for (int i = 0; i < 5; ++i) audd_free(m->streaming_urls[i]);
 }
 
-static void match_from_json(audd_enterprise_match_t *m, const cJSON *o)
+static void match_from_json(audd_enterprise_match_t *m, const cJSON *o, double base)
 {
     memset(m, 0, sizeof(*m));
+    m->start_seconds = -1.0;
+    m->end_seconds = -1.0;
     m->score = audd_json_get_int(o, "score", 0);
     m->timecode = strdup_or_null(audd_json_get_string(o, "timecode"));
     m->artist = strdup_or_null(audd_json_get_string(o, "artist"));
@@ -66,6 +118,13 @@ static void match_from_json(audd_enterprise_match_t *m, const cJSON *o)
     m->song_link = strdup_or_null(audd_json_get_string(o, "song_link"));
     m->start_offset = audd_json_get_int(o, "start_offset", 0);
     m->end_offset = audd_json_get_int(o, "end_offset", 0);
+    /* The chunk offset places the fragment in the user's file; start_offset/
+     * end_offset are milliseconds within the fragment. Combine them when the
+     * chunk offset is known; otherwise leave the seconds fields at -1.0. */
+    if (base >= 0.0) {
+        m->start_seconds = base + m->start_offset / 1000.0;
+        m->end_seconds = base + m->end_offset / 1000.0;
+    }
 }
 
 audd_enterprise_result_t *audd_enterprise_from_json(const cJSON *result_arr)
@@ -101,11 +160,12 @@ audd_enterprise_result_t *audd_enterprise_from_json(const cJSON *result_arr)
         if (!cJSON_IsObject(chunk)) continue;
         cJSON *songs = cJSON_GetObjectItemCaseSensitive(chunk, "songs");
         if (!cJSON_IsArray(songs)) continue;
+        double base = audd_offset_to_seconds(audd_json_get_string(chunk, "offset"));
         int n = cJSON_GetArraySize(songs);
         for (int j = 0; j < n; ++j) {
             cJSON *song = cJSON_GetArrayItem(songs, j);
             if (!cJSON_IsObject(song)) continue;
-            match_from_json(&r->items[r->count++], song);
+            match_from_json(&r->items[r->count++], song, base);
         }
     }
     return r;
@@ -138,6 +198,9 @@ const audd_enterprise_match_t *audd_enterprise_result_at(const audd_enterprise_r
 #define GETTER_STR(field) \
     const char *audd_enterprise_match_get_##field(const audd_enterprise_match_t *m) \
     { return m ? m->field : NULL; }
+#define GETTER_DBL(field) \
+    double audd_enterprise_match_get_##field(const audd_enterprise_match_t *m) \
+    { return m ? m->field : -1.0; }
 
 GETTER_INT(score)
 GETTER_STR(timecode)
@@ -151,6 +214,8 @@ GETTER_STR(upc)
 GETTER_STR(song_link)
 GETTER_INT(start_offset)
 GETTER_INT(end_offset)
+GETTER_DBL(start_seconds)
+GETTER_DBL(end_seconds)
 
 static const char *provider_str(audd_provider_t p)
 {
