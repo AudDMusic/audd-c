@@ -392,6 +392,8 @@ typedef struct {
     int skip_first_seconds;
     /** Tri-state: -1 absent, 0 false, 1 true. */
     int use_timecode;
+    /** Tri-state: -1 absent, 0 false, 1 true. Defaults to 1 (on) so
+     *  start_seconds/end_seconds are precise; set 0 to opt out. */
     int accurate_offsets;
     /** Additional form fields the typed params don't cover, as a
      *  NULL-terminated alternating key/value array. Typed params win on
@@ -399,7 +401,8 @@ typedef struct {
     const char **extra_parameters;
 } audd_enterprise_options_t;
 
-/** Defaults: -1 in every numeric field (= "not set"). */
+/** Defaults: numeric fields -1 (= "not set"), except accurate_offsets, which
+ *  defaults to 1 (on) so start_seconds/end_seconds are precise. */
 AUDD_API audd_enterprise_options_t audd_enterprise_options_default(void);
 
 AUDD_API audd_error_t audd_recognize_enterprise(audd_client_t *client,
@@ -434,6 +437,14 @@ AUDD_API const char *audd_enterprise_match_get_upc(const audd_enterprise_match_t
 AUDD_API const char *audd_enterprise_match_get_song_link(const audd_enterprise_match_t *m);
 AUDD_API int         audd_enterprise_match_get_start_offset(const audd_enterprise_match_t *m);
 AUDD_API int         audd_enterprise_match_get_end_offset(const audd_enterprise_match_t *m);
+
+/** Where the match plays in the user's file, in seconds (the chunk's position
+ *  plus the fragment-relative offset). Returns -1.0 when unknown (the chunk
+ *  carried no usable offset); real file positions are always >= 0. Precise
+ *  because the SDK requests accurate offsets by default. start_offset/
+ *  end_offset above are the raw fragment-relative milliseconds behind these. */
+AUDD_API double      audd_enterprise_match_get_start_seconds(const audd_enterprise_match_t *m);
+AUDD_API double      audd_enterprise_match_get_end_seconds(const audd_enterprise_match_t *m);
 
 /** Cover-art URL for lis.tn-hosted song_links; NULL otherwise. Borrowed. */
 AUDD_API const char *audd_enterprise_match_thumbnail_url(const audd_enterprise_match_t *m);

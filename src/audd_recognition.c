@@ -782,7 +782,7 @@ audd_enterprise_options_t audd_enterprise_options_default(void)
     o.limit = -1;
     o.skip_first_seconds = -1;
     o.use_timecode = -1;
-    o.accurate_offsets = -1;
+    o.accurate_offsets = 1; /* on by default; set 0 to opt out */
     o.extra_parameters = NULL;
     return o;
 }
@@ -808,6 +808,14 @@ static audd_error_t do_recognize_common(audd_client_t *client,
     recognize_ctx_t ctx = {0};
     ctx.is_enterprise = is_enterprise;
     char *return_csv = NULL;
+    /* When no enterprise options are supplied, fall back to the defaults so
+     * accurate offsets are still requested (precise start_seconds/end_seconds).
+     * Callers opt out by passing options with accurate_offsets = 0. */
+    audd_enterprise_options_t e_defaults;
+    if (is_enterprise && e_opts == NULL) {
+        e_defaults = audd_enterprise_options_default();
+        e_opts = &e_defaults;
+    }
     if (is_enterprise && e_opts) {
         return_csv = join_csv(e_opts->return_metadata);
         ctx.eopts = e_opts;

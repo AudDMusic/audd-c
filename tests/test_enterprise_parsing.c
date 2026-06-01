@@ -82,6 +82,48 @@ void test_song_without_score_parses(void)
     audd_enterprise_result_free(r);
 }
 
+void test_chunk_offset_to_seconds(void)
+{
+    /* Chunk "00:01:00" (60s) carries a song at fragment-relative 4200ms-
+     * 11800ms; the SDK places it at 64.2s-71.8s in the user's file. A chunk
+     * without an offset leaves the seconds fields at the -1.0 sentinel. */
+    const char *json = "["
+        "{\"offset\":\"00:01:00\",\"songs\":[{"
+            "\"score\":100,\"artist\":\"A\",\"title\":\"T\","
+            "\"start_offset\":4200,\"end_offset\":11800}]},"
+        "{\"songs\":[{\"score\":80,\"artist\":\"B\",\"title\":\"U\","
+            "\"start_offset\":1000,\"end_offset\":2000}]}"
+    "]";
+    cJSON *obj = cJSON_Parse(json);
+    TEST_ASSERT_NOT_NULL(obj);
+    audd_enterprise_result_t *r = audd_enterprise_from_json(obj);
+    cJSON_Delete(obj);
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_EQUAL_INT(2, (int)audd_enterprise_result_count(r));
+
+    const audd_enterprise_match_t *m1 = audd_enterprise_result_at(r, 0);
+    TEST_ASSERT_NOT_NULL(m1);
+    /* Compare in tenths to stay in integer space (Unity double assertions are
+     * disabled in this build). 64.2s and 71.8s. */
+    TEST_ASSERT_INT_WITHIN(1, 642,
+        (int)(audd_enterprise_match_get_start_seconds(m1) * 10.0 + 0.5));
+    TEST_ASSERT_INT_WITHIN(1, 718,
+        (int)(audd_enterprise_match_get_end_seconds(m1) * 10.0 + 0.5));
+    /* raw fragment-relative ms are preserved behind the seconds fields */
+    TEST_ASSERT_EQUAL_INT(4200, audd_enterprise_match_get_start_offset(m1));
+    TEST_ASSERT_EQUAL_INT(11800, audd_enterprise_match_get_end_offset(m1));
+
+    const audd_enterprise_match_t *m2 = audd_enterprise_result_at(r, 1);
+    TEST_ASSERT_NOT_NULL(m2);
+    /* sentinel: chunk had no offset, so seconds stay unknown */
+    TEST_ASSERT_EQUAL_INT(-10,
+        (int)(audd_enterprise_match_get_start_seconds(m2) * 10.0));
+    TEST_ASSERT_EQUAL_INT(-10,
+        (int)(audd_enterprise_match_get_end_seconds(m2) * 10.0));
+
+    audd_enterprise_result_free(r);
+}
+
 void test_empty_result(void)
 {
     cJSON *obj = cJSON_CreateArray();
@@ -99,6 +141,7 @@ int main(void)
     RUN_TEST(test_flattens_chunks);
     RUN_TEST(test_thumbnail_url);
     RUN_TEST(test_song_without_score_parses);
+    RUN_TEST(test_chunk_offset_to_seconds);
     RUN_TEST(test_empty_result);
     return UNITY_END();
 }

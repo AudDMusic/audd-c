@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(audd
-    VERSION 1.5.12
+    VERSION 1.5.13
     LANGUAGES C
     DESCRIPTION "Official C SDK for the AudD music recognition API"
 )
