@@ -2,6 +2,7 @@
 #include "audd_internal.h"
 #include "audd.h"
 
+#include <pthread.h>
 #include <string.h>
 
 audd_error_t audd_sentinel_for_code(int code)
@@ -76,47 +77,63 @@ const char *audd_error_string(audd_error_t err)
 void audd_client_set_error(audd_client_t *client, const char *message, int api_code)
 {
     if (client == NULL) return;
-    audd_free(client->last_error_message);
-    client->last_error_message = NULL;
-    if (message != NULL) {
-        client->last_error_message = audd_strdup(message);
-    }
+    char *dup = (message != NULL) ? audd_strdup(message) : NULL;
+    pthread_mutex_lock(&client->lock);
+    char *old = client->last_error_message;
+    client->last_error_message = dup;
     client->last_error_code = api_code;
+    pthread_mutex_unlock(&client->lock);
+    audd_free(old);
 }
 
 void audd_client_set_request_id(audd_client_t *client, const char *rid)
 {
     if (client == NULL) return;
-    audd_free(client->last_request_id);
-    client->last_request_id = (rid != NULL) ? audd_strdup(rid) : NULL;
+    char *dup = (rid != NULL) ? audd_strdup(rid) : NULL;
+    pthread_mutex_lock(&client->lock);
+    char *old = client->last_request_id;
+    client->last_request_id = dup;
+    pthread_mutex_unlock(&client->lock);
+    audd_free(old);
 }
 
 void audd_client_clear_error(audd_client_t *client)
 {
     if (client == NULL) return;
-    audd_free(client->last_error_message);
+    pthread_mutex_lock(&client->lock);
+    char *old = client->last_error_message;
     client->last_error_message = NULL;
     client->last_error_code = 0;
+    pthread_mutex_unlock(&client->lock);
+    audd_free(old);
 }
 
 const char *audd_last_error_message(const audd_client_t *client)
 {
-    if (client == NULL || client->last_error_message == NULL) {
-        return "";
-    }
-    return client->last_error_message;
+    if (client == NULL) return "";
+    audd_client_t *c = (audd_client_t *)client;
+    pthread_mutex_lock(&c->lock);
+    const char *msg = c->last_error_message ? c->last_error_message : "";
+    pthread_mutex_unlock(&c->lock);
+    return msg;
 }
 
 int audd_last_error_code(const audd_client_t *client)
 {
     if (client == NULL) return 0;
-    return client->last_error_code;
+    audd_client_t *c = (audd_client_t *)client;
+    pthread_mutex_lock(&c->lock);
+    int code = c->last_error_code;
+    pthread_mutex_unlock(&c->lock);
+    return code;
 }
 
 const char *audd_last_request_id(const audd_client_t *client)
 {
-    if (client == NULL || client->last_request_id == NULL) {
-        return "";
-    }
-    return client->last_request_id;
+    if (client == NULL) return "";
+    audd_client_t *c = (audd_client_t *)client;
+    pthread_mutex_lock(&c->lock);
+    const char *rid = c->last_request_id ? c->last_request_id : "";
+    pthread_mutex_unlock(&c->lock);
+    return rid;
 }

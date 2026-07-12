@@ -10,9 +10,6 @@
 
 #include "../vendor/cJSON/cJSON.h"
 
-static const char *kApiBase = "https://api.audd.io";
-static const char *kEnterpriseBase = "https://enterprise.audd.io";
-
 /* ---------------- metadata block structs ---------------- */
 
 struct audd_apple_music {
@@ -632,69 +629,88 @@ BLOCK_GETTER_STR(audd_musicbrainz, audd_musicbrainz_entry_t, score)
  * Recognition: HTTP request                                        *
  * ============================================================== */
 
-typedef struct {
-    const char *url;          /* URL source (NULL if not URL) */
-    const char *file_path;    /* file path source (NULL if not path) */
-    const void *bytes;        /* in-memory bytes (NULL if not bytes) */
-    size_t      bytes_size;
-    /* options */
-    const char *return_csv;   /* heap or NULL */
-    const char *market;
-    const char **extra_parameters; /* NULL-terminated key,value,...,NULL */
-    /* enterprise extras */
-    const audd_enterprise_options_t *eopts;
-    /* shared */
-    int        is_enterprise;
-} recognize_ctx_t;
+typedef audd_recognize_ctx_t recognize_ctx_t;
 
-static int recognize_attempt(audd_client_t *client,
-                             audd_http_response_t *resp,
-                             int *body_was_uploaded,
-                             void *ud)
+/* Collect the typed field keys that will be emitted for `ctx`, so extras that
+ * collide can be skipped. `out` must hold at least `cap` entries; returns the
+ * count written. */
+static size_t collect_typed_keys(const audd_recognize_ctx_t *ctx,
+                                 const char **out, size_t cap)
 {
-    recognize_ctx_t *ctx = (recognize_ctx_t *)ud;
-    /* Count extras and allocate field array with margin for typed fields. */
+    size_t n = 0;
+#define ADD_KEY(k) do { if (n < cap) out[n++] = (k); } while (0)
+    if (ctx->is_enterprise && ctx->eopts) {
+        if (ctx->eopts->skip >= 0)               ADD_KEY("skip");
+        if (ctx->eopts->every >= 0)              ADD_KEY("every");
+        if (ctx->eopts->limit >= 0)              ADD_KEY("limit");
+        if (ctx->eopts->skip_first_seconds >= 0) ADD_KEY("skip_first_seconds");
+        if (ctx->eopts->use_timecode >= 0)       ADD_KEY("use_timecode");
+        if (ctx->eopts->accurate_offsets >= 0)   ADD_KEY("accurate_offsets");
+    }
+    if (ctx->return_csv && ctx->return_csv[0]) ADD_KEY("return");
+    if (ctx->market && ctx->market[0])         ADD_KEY("market");
+    if (ctx->url)                              ADD_KEY("url");
+#undef ADD_KEY
+    return n;
+}
+
+static int key_in_set(const char *key, const char **set, size_t n)
+{
+    for (size_t i = 0; i < n; ++i) {
+        if (strcmp(key, set[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+size_t audd_recognize_fields_capacity(const audd_recognize_ctx_t *ctx)
+{
     size_t extras_pairs = 0;
     if (ctx->extra_parameters) {
         for (size_t i = 0; ctx->extra_parameters[i] != NULL && ctx->extra_parameters[i + 1] != NULL; i += 2) {
             extras_pairs++;
         }
     }
-    const size_t typed_slots = 32; /* upper bound for typed fields below */
-    const size_t total_slots = typed_slots + extras_pairs * 2 + 1;
-    const char **fields = (const char **)audd_malloc(total_slots * sizeof(*fields));
-    if (fields == NULL) return -1;
-    memset(fields, 0, total_slots * sizeof(*fields));
-    size_t f = 0;
-    char *return_str = NULL;
-    char skip_buf[16], every_buf[16], limit_buf[16], skipfs_buf[16];
-    audd_http_file_t file = {0};
-    audd_http_form_t form = {0};
+    /* 9 typed fields max * 2 + extras * 2 + NULL terminator. */
+    return 9 * 2 + extras_pairs * 2 + 1;
+}
 
-    /* extras first; typed params win on collision (later writes shadow earlier) */
+size_t audd_build_recognize_fields(const audd_recognize_ctx_t *ctx,
+                                   audd_recognize_scratch_t *scratch,
+                                   const char **fields,
+                                   size_t capacity)
+{
+    size_t f = 0;
+    const char *typed_keys[9];
+    size_t typed_n = collect_typed_keys(ctx, typed_keys, 9);
+
+    /* Extras first, but drop any whose key a typed field will shadow. */
     if (ctx->extra_parameters) {
         for (size_t i = 0; ctx->extra_parameters[i] != NULL && ctx->extra_parameters[i + 1] != NULL; i += 2) {
-            fields[f++] = ctx->extra_parameters[i];
+            const char *k = ctx->extra_parameters[i];
+            if (key_in_set(k, typed_keys, typed_n)) continue;
+            if (f + 2 >= capacity) break;
+            fields[f++] = k;
             fields[f++] = ctx->extra_parameters[i + 1];
         }
     }
 
     if (ctx->is_enterprise && ctx->eopts) {
         if (ctx->eopts->skip >= 0) {
-            snprintf(skip_buf, sizeof(skip_buf), "%d", ctx->eopts->skip);
-            fields[f++] = "skip"; fields[f++] = skip_buf;
+            snprintf(scratch->skip, sizeof(scratch->skip), "%d", ctx->eopts->skip);
+            fields[f++] = "skip"; fields[f++] = scratch->skip;
         }
         if (ctx->eopts->every >= 0) {
-            snprintf(every_buf, sizeof(every_buf), "%d", ctx->eopts->every);
-            fields[f++] = "every"; fields[f++] = every_buf;
+            snprintf(scratch->every, sizeof(scratch->every), "%d", ctx->eopts->every);
+            fields[f++] = "every"; fields[f++] = scratch->every;
         }
         if (ctx->eopts->limit >= 0) {
-            snprintf(limit_buf, sizeof(limit_buf), "%d", ctx->eopts->limit);
-            fields[f++] = "limit"; fields[f++] = limit_buf;
+            snprintf(scratch->limit, sizeof(scratch->limit), "%d", ctx->eopts->limit);
+            fields[f++] = "limit"; fields[f++] = scratch->limit;
         }
         if (ctx->eopts->skip_first_seconds >= 0) {
-            snprintf(skipfs_buf, sizeof(skipfs_buf), "%d", ctx->eopts->skip_first_seconds);
-            fields[f++] = "skip_first_seconds"; fields[f++] = skipfs_buf;
+            snprintf(scratch->skip_first_seconds, sizeof(scratch->skip_first_seconds),
+                     "%d", ctx->eopts->skip_first_seconds);
+            fields[f++] = "skip_first_seconds"; fields[f++] = scratch->skip_first_seconds;
         }
         if (ctx->eopts->use_timecode >= 0) {
             fields[f++] = "use_timecode";
@@ -715,6 +731,27 @@ static int recognize_attempt(audd_client_t *client,
         fields[f++] = "url"; fields[f++] = ctx->url;
     }
     fields[f] = NULL;
+    return f;
+}
+
+static int recognize_attempt(audd_client_t *client,
+                             audd_http_response_t *resp,
+                             int *body_was_uploaded,
+                             void *ud)
+{
+    recognize_ctx_t *ctx = (recognize_ctx_t *)ud;
+    const size_t total_slots = audd_recognize_fields_capacity(ctx);
+    const char **fields = (const char **)audd_malloc(total_slots * sizeof(*fields));
+    if (fields == NULL) {
+        audd_client_set_error(client, "audd: out of memory", 0);
+        return -1;
+    }
+    memset(fields, 0, total_slots * sizeof(*fields));
+    audd_recognize_scratch_t scratch;
+    audd_http_file_t file = {0};
+    audd_http_form_t form = {0};
+
+    audd_build_recognize_fields(ctx, &scratch, fields, total_slots);
     form.fields = fields;
 
     if (ctx->file_path) {
@@ -741,7 +778,6 @@ static int recognize_attempt(audd_client_t *client,
         : "https://api.audd.io/";
 
     int rc = audd_http_post(client, endpoint, &form, timeout, resp, body_was_uploaded);
-    audd_free(return_str);
     audd_free((void *)fields);
     return rc;
 }
@@ -866,13 +902,18 @@ static audd_error_t do_recognize_common(audd_client_t *client,
     cJSON *result = cJSON_GetObjectItemCaseSensitive(resp.json, "result");
     if (is_enterprise) {
         *out_enterprise = audd_enterprise_from_json(result);
+        if (*out_enterprise == NULL) {
+            audd_client_set_error(client, "audd: out of memory", 0);
+            audd_http_response_free(&resp);
+            return AUDD_ERR_OUT_OF_MEMORY;
+        }
     } else {
         if (result == NULL || cJSON_IsNull(result)) {
             *out_recognition = NULL;
         } else {
             *out_recognition = audd_recognition_from_json(result);
             if (*out_recognition == NULL) {
-                audd_client_set_error(client, "out of memory", 0);
+                audd_client_set_error(client, "audd: out of memory", 0);
                 audd_http_response_free(&resp);
                 return AUDD_ERR_OUT_OF_MEMORY;
             }
@@ -925,11 +966,3 @@ audd_error_t audd_recognize_enterprise_bytes(audd_client_t *client,
     if (data == NULL || size == 0) return AUDD_ERR_INVALID_ARGUMENT;
     return do_recognize_common(client, NULL, data, size, NULL, options, 1, NULL, out_result);
 }
-
-/* Suppress unused-param warning when kApiBase/kEnterpriseBase aren't used. */
-__attribute__((unused)) static const char *kApiBaseRef = "https://api.audd.io";
-__attribute__((unused)) static const char *kEntBaseRef = "https://enterprise.audd.io";
-
-/* Reference the `api_token` field by indirection so static checkers don't
- * complain about kApiBase / kEnterpriseBase being unused from this file. */
-__attribute__((unused)) static void _client_keepalive(audd_client_t *c) { (void)c; (void)kApiBase; (void)kEnterpriseBase; }

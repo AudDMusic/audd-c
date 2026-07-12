@@ -72,7 +72,7 @@ static size_t header_cb(char *buffer, size_t size, size_t nitems, void *userdata
 void audd_http_response_free(audd_http_response_t *r)
 {
     if (r == NULL) return;
-    audd_free(r->body);
+    audd_realloc_free(r->body); /* grown via audd_realloc (buf_t) */
     audd_free(r->request_id);
     if (r->json) cJSON_Delete(r->json);
     memset(r, 0, sizeof(*r));
@@ -156,11 +156,13 @@ int audd_http_post(audd_client_t *client,
      * recognize uploads and form-only requests (set callback url, etc). */
     curl_mime *mime = curl_mime_init(eh);
 
-    /* Always include api_token field. */
-    if (client->api_token != NULL) {
+    /* Snapshot the token under the client lock so a concurrent
+     * audd_client_set_api_token can't free it out from under this request. */
+    char *api_token = audd_client_copy_api_token(client);
+    if (api_token != NULL) {
         curl_mimepart *part = curl_mime_addpart(mime);
         curl_mime_name(part, "api_token");
-        curl_mime_data(part, client->api_token, CURL_ZERO_TERMINATED);
+        curl_mime_data(part, api_token, CURL_ZERO_TERMINATED);
     }
 
     /* Form fields. */
@@ -192,6 +194,9 @@ int audd_http_post(audd_client_t *client,
         }
     }
     curl_easy_setopt(eh, CURLOPT_MIMEPOST, mime);
+    /* curl_mime_data copied the token bytes into the mime part; the snapshot
+     * is no longer needed. */
+    audd_free(api_token);
 
     CURLcode rc = curl_easy_perform(eh);
     long status = 0;
@@ -202,7 +207,7 @@ int audd_http_post(audd_client_t *client,
         char *msg = audd_aprintf("audd: connection error: %s", curl_easy_strerror(rc));
         audd_client_set_error(client, msg ? msg : "connection error", 0);
         audd_free(msg);
-        audd_free(body.data);
+        audd_realloc_free(body.data);
         audd_free(request_id);
         curl_mime_free(mime);
         curl_easy_cleanup(eh);
@@ -242,25 +247,38 @@ int audd_http_get(audd_client_t *client,
             audd_client_set_error(client, "out of memory", 0);
             return -1;
         }
+        /* One curl handle for all escapes in this build. */
+        CURL *esc = curl_easy_init();
+        if (esc == NULL) {
+            audd_free(full_url);
+            audd_client_set_error(client, "curl_easy_init failed", 0);
+            return -1;
+        }
         size_t off = 0;
         memcpy(full_url + off, url, strlen(url));
         off += strlen(url);
         full_url[off++] = (strchr(url, '?') == NULL) ? '?' : '&';
         int first = 1;
         for (size_t i = 0; query_kv[i] != NULL && query_kv[i+1] != NULL; i += 2) {
+            char *kk = curl_easy_escape(esc, query_kv[i], 0);
+            char *vv = curl_easy_escape(esc, query_kv[i+1], 0);
+            if (kk == NULL || vv == NULL) {
+                curl_free(kk); curl_free(vv);
+                curl_easy_cleanup(esc);
+                audd_free(full_url);
+                audd_client_set_error(client, "curl_easy_escape failed", 0);
+                return -1;
+            }
             if (!first) full_url[off++] = '&';
             first = 0;
-            CURL *tmp = curl_easy_init();
-            char *kk = curl_easy_escape(tmp, query_kv[i], 0);
-            char *vv = curl_easy_escape(tmp, query_kv[i+1], 0);
             size_t kl = strlen(kk), vl = strlen(vv);
             memcpy(full_url + off, kk, kl); off += kl;
             full_url[off++] = '=';
             memcpy(full_url + off, vv, vl); off += vl;
             curl_free(kk); curl_free(vv);
-            curl_easy_cleanup(tmp);
         }
         full_url[off] = '\0';
+        curl_easy_cleanup(esc);
     } else {
         full_url = audd_strdup(url);
         if (full_url == NULL) {
@@ -288,7 +306,7 @@ int audd_http_get(audd_client_t *client,
         char *msg = audd_aprintf("audd: connection error: %s", curl_easy_strerror(rc));
         audd_client_set_error(client, msg ? msg : "connection error", 0);
         audd_free(msg);
-        audd_free(body.data);
+        audd_realloc_free(body.data);
         audd_free(request_id);
         audd_free(full_url);
         curl_easy_cleanup(eh);

@@ -269,10 +269,9 @@ audd_error_t audd_streams_derive_longpoll_category(const audd_client_t *client,
                                                      char *out_category)
 {
     if (client == NULL) return AUDD_ERR_INVALID_ARGUMENT;
-    if (client->api_token == NULL) return AUDD_ERR_AUTHENTICATION;
-    return audd_derive_longpoll_category(client->api_token, radio_id, out_category);
+    char *token = audd_client_copy_api_token((audd_client_t *)client);
+    if (token == NULL) return AUDD_ERR_AUTHENTICATION;
+    audd_error_t e = audd_derive_longpoll_category(token, radio_id, out_category);
+    audd_free(token);
+    return e;
 }
-
-/* Reference kApiBase to silence unused warning. */
-__attribute__((unused)) static const char *_kab = NULL;
-__attribute__((unused)) static void _ref(void) { _kab = kApiBase; }

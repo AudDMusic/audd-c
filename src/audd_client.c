@@ -4,6 +4,7 @@
 #include "../include/audd_version.h"
 
 #include <curl/curl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,21 +31,23 @@ static char *make_user_agent(const char *suffix)
     return audd_aprintf("audd-c/%s %s", AUDD_VERSION, suffix);
 }
 
-static void global_init_once(void)
+static pthread_once_t g_curl_once = PTHREAD_ONCE_INIT;
+
+static void curl_global_init_once(void)
 {
-    static int inited = 0;
-    if (!inited) {
-        curl_global_init(CURL_GLOBAL_DEFAULT);
-        inited = 1;
-    }
+    curl_global_init(CURL_GLOBAL_DEFAULT);
 }
 
 audd_client_t *audd_client_new(const char *api_token, const audd_options_t *options)
 {
-    global_init_once();
+    pthread_once(&g_curl_once, curl_global_init_once);
     audd_client_t *c = (audd_client_t *)audd_malloc(sizeof(*c));
     if (c == NULL) return NULL;
     memset(c, 0, sizeof(*c));
+    if (pthread_mutex_init(&c->lock, NULL) != 0) {
+        audd_free(c);
+        return NULL;
+    }
     c->options = options ? *options : audd_options_default();
     if (c->options.standard_timeout_seconds <= 0) c->options.standard_timeout_seconds = 60;
     if (c->options.enterprise_timeout_seconds <= 0) c->options.enterprise_timeout_seconds = 3600;
@@ -108,6 +111,7 @@ void audd_client_free(audd_client_t *client)
     audd_free(client->ca_bundle_path);
     audd_free(client->last_error_message);
     audd_free(client->last_request_id);
+    pthread_mutex_destroy(&client->lock);
     audd_free(client);
 }
 
@@ -118,9 +122,23 @@ audd_error_t audd_client_set_api_token(audd_client_t *client, const char *new_to
     }
     char *dup = audd_strdup(new_token);
     if (dup == NULL) return AUDD_ERR_OUT_OF_MEMORY;
-    audd_free(client->api_token);
+    pthread_mutex_lock(&client->lock);
+    char *old = client->api_token;
     client->api_token = dup;
+    pthread_mutex_unlock(&client->lock);
+    /* Free the old token outside the lock — no reader can reach it now, and
+     * request builders always snapshot the token under the lock before use. */
+    audd_free(old);
     return AUDD_OK;
+}
+
+char *audd_client_copy_api_token(audd_client_t *client)
+{
+    if (client == NULL) return NULL;
+    pthread_mutex_lock(&client->lock);
+    char *copy = (client->api_token != NULL) ? audd_strdup(client->api_token) : NULL;
+    pthread_mutex_unlock(&client->lock);
+    return copy;
 }
 
 const char *audd_client_api_token(const audd_client_t *client)

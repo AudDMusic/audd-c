@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(audd
-    VERSION 1.5.13
+    VERSION 1.5.14
     LANGUAGES C
     DESCRIPTION "Official C SDK for the AudD music recognition API"
 )
@@ -27,6 +27,9 @@ endif()
 if(NOT CURL_FOUND)
     find_package(CURL REQUIRED)
 endif()
+
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
 
 # --- Sources ---------------------------------------------------------------
 set(AUDD_VENDOR_SOURCES
@@ -91,6 +94,7 @@ if(AUDD_BUILD_SHARED)
     if(CURL_LDFLAGS_OTHER)
         target_link_options(audd PRIVATE ${CURL_LDFLAGS_OTHER})
     endif()
+    target_link_libraries(audd PRIVATE Threads::Threads)
     set_target_properties(audd PROPERTIES
         VERSION ${PROJECT_VERSION}
         SOVERSION ${PROJECT_VERSION_MAJOR}
@@ -110,6 +114,7 @@ if(AUDD_BUILD_STATIC)
     elseif(TARGET CURL::libcurl)
         target_link_libraries(audd_static PUBLIC CURL::libcurl)
     endif()
+    target_link_libraries(audd_static PUBLIC Threads::Threads)
     set_target_properties(audd_static PROPERTIES OUTPUT_NAME audd)
 endif()
 

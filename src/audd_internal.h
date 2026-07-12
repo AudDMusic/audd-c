@@ -7,6 +7,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <pthread.h>
 
 #include "../vendor/cJSON/cJSON.h"
 
@@ -21,6 +22,11 @@ extern "C" {
 void  *audd_malloc(size_t size);
 void   audd_free(void *ptr);
 void  *audd_realloc(void *ptr, size_t size);
+/* Free a buffer obtained from audd_realloc. Buffers grown through
+ * audd_realloc must be released with this (not audd_free): under a custom
+ * malloc-only allocator, audd_realloc carries a size header that only the
+ * realloc path knows how to unwind. NULL-safe. */
+void   audd_realloc_free(void *ptr);
 char  *audd_strdup(const char *s);
 char  *audd_strndup(const char *s, size_t n);
 
@@ -117,15 +123,20 @@ int audd_retry_do(audd_client_t *client,
  * ------------------------------------------------------------------ */
 
 struct audd_client {
-    char *api_token;             /* heap, may be NULL */
-    audd_options_t options;
-    char *user_agent;            /* heap */
-    char *ca_bundle_path;        /* heap or NULL */
+    char *api_token;             /* heap, may be NULL — guarded by `lock` */
+    audd_options_t options;      /* immutable after create */
+    char *user_agent;            /* heap — immutable after create */
+    char *ca_bundle_path;        /* heap or NULL — immutable after create */
 
-    /* last-error scratch state */
+    /* last-error scratch state — guarded by `lock` */
     char *last_error_message;    /* heap or NULL */
     int   last_error_code;       /* AudD numeric */
     char *last_request_id;       /* heap or NULL */
+
+    /* Guards api_token and the last-error/last-request-id fields so that
+     * concurrent requests, token rotation, and getters on one client are
+     * data-race free. */
+    pthread_mutex_t lock;
 
     /* longpoll cancellation: shared "cancel" flag bumped from any thread.
      * NOT a mutex-protected field — single producer, single consumer
@@ -138,6 +149,12 @@ void audd_client_set_error(audd_client_t *client,
                            int api_code);
 void audd_client_set_request_id(audd_client_t *client, const char *rid);
 void audd_client_clear_error(audd_client_t *client);
+
+/* Copy the current API token under the client lock. Returns a heap string
+ * the caller frees with audd_free, or NULL if no token is set (or OOM).
+ * Callers building a request snapshot the token this way so a concurrent
+ * audd_client_set_api_token can't free it mid-flight. */
+char *audd_client_copy_api_token(audd_client_t *client);
 
 /* Map AudD numeric error code to sentinel. */
 audd_error_t audd_sentinel_for_code(int code);
@@ -177,6 +194,45 @@ audd_recognition_t *audd_recognition_from_json(const cJSON *result_obj);
 
 audd_enterprise_result_t *audd_enterprise_from_json(const cJSON *result_arr);
 
+/* Request-parameter assembly (shared with tests). */
+typedef struct {
+    const char *url;          /* URL source (NULL if not URL) */
+    const char *file_path;    /* file path source (NULL if not path) */
+    const void *bytes;        /* in-memory bytes (NULL if not bytes) */
+    size_t      bytes_size;
+    const char *return_csv;   /* heap or NULL */
+    const char *market;
+    const char **extra_parameters; /* NULL-terminated key,value,...,NULL */
+    const audd_enterprise_options_t *eopts;
+    int         is_enterprise;
+} audd_recognize_ctx_t;
+
+/* Scratch storage for the numeric typed fields, owned by the caller so the
+ * pointers written into the field array stay valid. */
+typedef struct {
+    char skip[16];
+    char every[16];
+    char limit[16];
+    char skip_first_seconds[16];
+} audd_recognize_scratch_t;
+
+/*
+ * Assemble the alternating key/value field list for a recognize request into
+ * `fields` (which must hold at least audd_recognize_fields_capacity(ctx)
+ * entries). extra_parameters are emitted first, but any extras entry whose key
+ * collides with a typed field that is also being sent is skipped, so typed
+ * params win and no key is sent twice. Writes a trailing NULL and returns the
+ * number of string slots used (excluding the terminator).
+ */
+size_t audd_build_recognize_fields(const audd_recognize_ctx_t *ctx,
+                                   audd_recognize_scratch_t *scratch,
+                                   const char **fields,
+                                   size_t capacity);
+
+/* Upper bound on the slot count needed by audd_build_recognize_fields
+ * (including the NULL terminator). */
+size_t audd_recognize_fields_capacity(const audd_recognize_ctx_t *ctx);
+
 /* ------------------------------------------------------------------ *
  * Stream callback parsing                                              *
  * ------------------------------------------------------------------ */
@@ -186,6 +242,28 @@ audd_error_t audd_parse_callback_internal(const char *body,
                                           audd_stream_callback_match_t **out_match,
                                           audd_stream_callback_notification_t **out_notification,
                                           char **out_error);
+
+/* ------------------------------------------------------------------ *
+ * Longpoll classification helpers (shared with tests).                *
+ * ------------------------------------------------------------------ */
+
+typedef enum {
+    AUDD_LONGPOLL_CONTINUE,   /* consumed / keepalive / unrecognized — poll again */
+    AUDD_LONGPOLL_RETRY,      /* transient failure — back off and reconnect */
+    AUDD_LONGPOLL_TERMINAL    /* auth / API / fatal — stop the loop */
+} audd_longpoll_action_t;
+
+/* Classify a poll outcome. `rc` is the audd_http_get return (0 = got HTTP
+ * response, non-zero = connection/timeout-class failure). `status` is the HTTP
+ * status when rc == 0. Connection failures and transient HTTP statuses
+ * (408/429/5xx) are RETRY; other >= 400 statuses are TERMINAL; otherwise the
+ * caller inspects the body. */
+audd_longpoll_action_t audd_longpoll_classify_http(int rc, long status);
+
+/* Poll request timeout: the socket must outlast the server-side longpoll hold,
+ * so use max(standard_timeout_seconds, hold_timeout_seconds + margin). */
+long audd_longpoll_poll_timeout(long standard_timeout_seconds,
+                                int hold_timeout_seconds);
 
 /* ------------------------------------------------------------------ *
  * URL helpers                                                          *

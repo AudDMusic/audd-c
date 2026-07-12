@@ -13,6 +13,11 @@ set(AUDD_TEST_FILES
     test_enterprise_parsing.c
     test_extras.c
     test_retry_policy.c
+    test_param_dedup.c
+    test_longpoll_resilience.c
+    test_alloc_emulation.c
+    test_enterprise_oom.c
+    test_concurrency.c
 )
 
 foreach(t ${AUDD_TEST_FILES})

@@ -27,7 +27,7 @@ Drop the SDK into your CMake project via `FetchContent`:
 include(FetchContent)
 FetchContent_Declare(audd
     GIT_REPOSITORY https://github.com/AudDMusic/audd-c.git
-    GIT_TAG        v1.5.7
+    GIT_TAG        v1.5.14
 )
 FetchContent_MakeAvailable(audd)
 
@@ -130,18 +130,19 @@ audd_client_t *client = audd_client_new(NULL, NULL);
 ```
 
 Get a real token at [dashboard.audd.io](https://dashboard.audd.io). The
-public `"test"` token works for the snippets above but is capped at 10
-requests.
+public `"test"` token works for the snippets above but is capped at
+10 requests/day.
 
 For long-running services that pull tokens from a secret manager and
 need to swap them without restarting:
 
 ```c
-audd_client_set_api_token(client, new_token); /* atomic */
+audd_client_set_api_token(client, new_token); /* thread-safe */
 ```
 
-In-flight requests continue with the previous token; subsequent ones use
-the new value.
+Safe to call while requests are in flight on other threads: each request
+snapshots the token before use, so in-flight requests finish with whichever
+token was current when they started; subsequent ones use the new value.
 
 If you'd rather fail fast at construction time when no token is
 configured, use `audd_client_new_strict`, which writes
@@ -157,17 +158,20 @@ song link — no metadata-block opt-in needed:
 audd_recognition_t *r = NULL;
 audd_recognize(client, "https://audd.tech/example.mp3", NULL, &r);
 
+/* Any getter may return NULL when the field is absent; guard before %s. */
+#define OR_NONE(x) ((x) ? (x) : "(none)")
+
 printf("%s — %s\n",
-       audd_recognition_get_artist(r),
-       audd_recognition_get_title(r));
-printf("Album:    %s\n", audd_recognition_get_album(r));
-printf("Released: %s\n", audd_recognition_get_release_date(r));
-printf("Label:    %s\n", audd_recognition_get_label(r));
-printf("AudD:     %s\n", audd_recognition_get_song_link(r));
+       OR_NONE(audd_recognition_get_artist(r)),
+       OR_NONE(audd_recognition_get_title(r)));
+printf("Album:    %s\n", OR_NONE(audd_recognition_get_album(r)));
+printf("Released: %s\n", OR_NONE(audd_recognition_get_release_date(r)));
+printf("Label:    %s\n", OR_NONE(audd_recognition_get_label(r)));
+printf("AudD:     %s\n", OR_NONE(audd_recognition_get_song_link(r)));
 
 /* Helpers, driven off song_link — work without any return-metadata opt-in: */
-printf("Cover:    %s\n", audd_recognition_thumbnail_url(r));
-printf("Spotify:  %s\n", audd_recognition_streaming_url(r, AUDD_PROVIDER_SPOTIFY));
+printf("Cover:    %s\n", OR_NONE(audd_recognition_thumbnail_url(r)));
+printf("Spotify:  %s\n", OR_NONE(audd_recognition_streaming_url(r, AUDD_PROVIDER_SPOTIFY)));
 
 audd_recognition_free(r);
 ```
@@ -184,9 +188,9 @@ audd_recognize(client, "https://audd.tech/example.mp3", &opts, &r);
 
 const audd_apple_music_t *am = audd_recognition_apple_music(r);
 const audd_spotify_t     *sp = audd_recognition_spotify(r);
-if (am) printf("Apple Music: %s\n", audd_apple_music_get_url(am));
-if (sp) printf("Spotify URI: %s\n", audd_spotify_get_uri(sp));
-printf("Preview:     %s\n", audd_recognition_preview_url(r));
+if (am) printf("Apple Music: %s\n", OR_NONE(audd_apple_music_get_url(am)));
+if (sp) printf("Spotify URI: %s\n", OR_NONE(audd_spotify_get_uri(sp)));
+printf("Preview:     %s\n", OR_NONE(audd_recognition_preview_url(r)));
 ```
 
 Valid `return_metadata` values: `apple_music`, `spotify`, `deezer`,

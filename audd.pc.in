@@ -8,4 +8,5 @@ Description: Official C SDK for the AudD music recognition API
 Version: @PROJECT_VERSION@
 Requires.private: libcurl
 Libs: -L${libdir} -laudd
+Libs.private: -pthread
 Cflags: -I${includedir}

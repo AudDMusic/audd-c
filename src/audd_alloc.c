@@ -4,6 +4,7 @@
 #include "../include/audd_version.h"
 
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,31 +52,62 @@ void audd_free(void *ptr)
     free(ptr);
 }
 
+/*
+ * Realloc emulation for custom allocators that supply malloc_fn/free_fn but
+ * no realloc_fn.
+ *
+ * To copy only the still-valid bytes on grow/shrink we must know the previous
+ * allocation size, so emulated blocks carry a small size-prefix header. The
+ * header is `max_align_t`-sized so the pointer we hand back stays maximally
+ * aligned. Blocks allocated this way are ONLY reachable through audd_realloc
+ * (both growth and freeing via size == 0), so the header layout never leaks
+ * into audd_malloc/audd_free or into cJSON's own hooks.
+ */
+typedef union {
+    size_t        size;
+    max_align_t   align;
+} audd_emu_header_t;
+
+static void *audd_emu_realloc(void *ptr, size_t size)
+{
+    if (size == 0) {
+        if (ptr != NULL) {
+            audd_emu_header_t *h = (audd_emu_header_t *)ptr - 1;
+            g_alloc.free_fn(h);
+        }
+        return NULL;
+    }
+    audd_emu_header_t *nh = (audd_emu_header_t *)g_alloc.malloc_fn(sizeof(audd_emu_header_t) + size);
+    if (nh == NULL) {
+        return NULL; /* original block left intact, per realloc semantics */
+    }
+    nh->size = size;
+    void *out = (void *)(nh + 1);
+    if (ptr != NULL) {
+        audd_emu_header_t *oh = (audd_emu_header_t *)ptr - 1;
+        size_t old_size = oh->size;
+        size_t copy = old_size < size ? old_size : size;
+        memcpy(out, ptr, copy);
+        g_alloc.free_fn(oh);
+    }
+    return out;
+}
+
 void *audd_realloc(void *ptr, size_t size)
 {
     if (g_alloc_set && g_alloc.realloc_fn) {
         return g_alloc.realloc_fn(ptr, size);
     }
     if (g_alloc_set && g_alloc.malloc_fn) {
-        /* No realloc plugged in; emulate. */
-        if (size == 0) {
-            audd_free(ptr);
-            return NULL;
-        }
-        void *p = audd_malloc(size);
-        if (p == NULL) {
-            return NULL;
-        }
-        if (ptr != NULL) {
-            /* We don't know old size; the caller of audd_realloc must
-             * tolerate this fallback by tracking growth themselves. We
-             * only use realloc with a known-tracked buffer in this SDK. */
-            memcpy(p, ptr, size);
-            audd_free(ptr);
-        }
-        return p;
+        return audd_emu_realloc(ptr, size);
     }
     return realloc(ptr, size);
+}
+
+void audd_realloc_free(void *ptr)
+{
+    if (ptr == NULL) return;
+    (void)audd_realloc(ptr, 0);
 }
 
 char *audd_strdup(const char *s)

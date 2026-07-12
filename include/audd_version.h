@@ -2,6 +2,6 @@
 #ifndef AUDD_VERSION_H
 #define AUDD_VERSION_H
 
-#define AUDD_VERSION "1.5.13"
+#define AUDD_VERSION "1.5.14"
 
 #endif /* AUDD_VERSION_H */

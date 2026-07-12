@@ -49,6 +49,14 @@ AUDD_API const char *audd_version(void);
  * call. Allocator functions must follow C99 semantics: malloc(0) may
  * return NULL or a unique pointer, free(NULL) is a no-op, realloc(p, 0)
  * is implementation-defined.
+ *
+ * realloc_fn is optional. When you supply malloc_fn and free_fn but leave
+ * realloc_fn NULL, the SDK emulates realloc on top of malloc/free (allocate,
+ * copy the smaller of old/new size, free). Emulated blocks carry a small
+ * internal, maximally-aligned size header so only the still-valid bytes are
+ * copied; this is fully internal and does not affect the pointers or sizes
+ * seen by your malloc_fn/free_fn beyond that header. Supplying realloc_fn
+ * avoids the emulation entirely.
  */
 
 typedef struct {
@@ -180,7 +188,13 @@ AUDD_API audd_options_t audd_options_default(void);
  * options may be NULL (uses audd_options_default()). The options struct
  * is copied.
  *
- * Thread-safety: audd_client_t is safe to share across threads. A
+ * Thread-safety: audd_client_t is safe to share across threads. Multiple
+ * requests may run concurrently on one client, and audd_client_set_api_token
+ * may be called from another thread while requests are in flight — each
+ * request snapshots the token before building its body, so a rotation never
+ * corrupts an in-flight request (it uses whichever token was current when it
+ * started). The last-error / last-request-id state is likewise guarded; see
+ * the accessor docs below for the exact returned-pointer lifetime. A
  * recognize / longpoll call running on one thread can be cancelled from
  * another via audd_client_close (terminal) or audd_longpoll_close (per
  * subscription).
@@ -199,22 +213,37 @@ AUDD_API audd_client_t *audd_client_new_strict(const char *api_token,
 /** Free the client and all resources. NULL-safe. */
 AUDD_API void audd_client_free(audd_client_t *client);
 
-/** Atomically rotate the API token. Returns AUDD_ERR_INVALID_ARGUMENT for
- *  NULL/empty inputs. In-flight requests continue with the old token. */
+/** Rotate the API token. Returns AUDD_ERR_INVALID_ARGUMENT for NULL/empty
+ *  inputs. Safe to call while requests are in flight on other threads: each
+ *  request snapshots the token before use, so in-flight requests complete
+ *  with whichever token was current when they started. */
 AUDD_API audd_error_t audd_client_set_api_token(audd_client_t *client,
                                                 const char *new_token);
 
-/** Borrowed pointer to the in-effect API token. NULL when none set. */
+/** Borrowed pointer to the in-effect API token. NULL when none set. The
+ *  returned pointer is valid only until the next audd_client_set_api_token
+ *  on this client; do not read it concurrently with a rotation on another
+ *  thread. */
 AUDD_API const char *audd_client_api_token(const audd_client_t *client);
 
-/** Last error message produced by `client`. Never NULL; "" when no error. */
+/** Last error message from the most recent completed call on `client`.
+ *  Never NULL; "" when no error. The returned pointer is BORROWED and valid
+ *  only until the next call on the same client mutates the last-error state
+ *  (any subsequent request, or a next error). Copy it (e.g. strdup) if you
+ *  need to retain it. Calling this is data-race free, but do not dereference
+ *  the returned pointer while another thread may be running a request or
+ *  otherwise mutating this client's error state — snapshot the string on the
+ *  same thread that produced the error, or copy under your own synchronization.
+ *  audd_last_error_code (returned by value) is always safe. */
 AUDD_API const char *audd_last_error_message(const audd_client_t *client);
 
 /** AudD numeric error code from the most recent failed call (e.g. 901).
- *  0 when no error or when failure was SDK-local (not from the API). */
+ *  0 when no error or when failure was SDK-local (not from the API). Returned
+ *  by value; fully safe to call concurrently. */
 AUDD_API int audd_last_error_code(const audd_client_t *client);
 
-/** X-Request-Id of the most recent response, if any. Borrowed. "" if none. */
+/** X-Request-Id of the most recent response, if any. Borrowed; same lifetime
+ *  and concurrency rules as audd_last_error_message. "" if none. */
 AUDD_API const char *audd_last_request_id(const audd_client_t *client);
 
 /* ---------------------------------------------------------------------- *
@@ -260,8 +289,7 @@ typedef struct {
  *   - AUDD_ERR_*                     → error (use audd_last_error_message)
  *
  * options may be NULL (defaults). Thread-safety: safe to call concurrently
- * with itself; thread-unsafe with audd_client_set_api_token (which is fine
- * because token rotation is rare).
+ * with itself and with audd_client_set_api_token on another thread.
  */
 AUDD_API audd_error_t audd_recognize(audd_client_t *client,
                                      const char *source,
@@ -640,6 +668,13 @@ AUDD_API audd_longpoll_options_t audd_longpoll_options_default(void);
  * Block this thread polling `category` for stream events. Calls back the
  * given functions for each event. Returns when a terminal error fires or
  * when audd_longpoll_close is called from another thread.
+ *
+ * Resilience: transient failures (connection/timeout/5xx) do not end the
+ * subscription — the loop reconnects with bounded exponential backoff, and
+ * each transient failure is reported through on_error as a non-fatal notice
+ * before the retry. Unrecognized or unparseable poll bodies are skipped and
+ * polling continues. Only authentication/API errors and audd_longpoll_close
+ * are terminal.
  *
  * options may be NULL.
  *

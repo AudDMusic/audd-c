@@ -8,8 +8,50 @@
 
 #include "../vendor/cJSON/cJSON.h"
 
+#include <time.h>
+
 static const char *kApiBase = "https://api.audd.io";
 static const int kNoCallbackErrorCode = 19;
+
+/* Reconnect backoff bounds and how many consecutive transient failures we
+ * tolerate before giving up. */
+static const long kBackoffStartMs = 500;
+static const long kBackoffMaxMs = 30000;
+static const int  kMaxConsecutiveFailures = 8;
+/* Extra socket slack over the server-side hold so the poll doesn't time out
+ * before the server releases the request. */
+static const int  kPollTimeoutMarginSeconds = 15;
+
+long audd_longpoll_poll_timeout(long standard_timeout_seconds,
+                                int hold_timeout_seconds)
+{
+    long need = (long)hold_timeout_seconds + kPollTimeoutMarginSeconds;
+    long base = standard_timeout_seconds > 0 ? standard_timeout_seconds : 60;
+    return need > base ? need : base;
+}
+
+audd_longpoll_action_t audd_longpoll_classify_http(int rc, long status)
+{
+    if (rc != 0) {
+        /* Connection / timeout-class failure — transient. */
+        return AUDD_LONGPOLL_RETRY;
+    }
+    if (status >= 400) {
+        if (status == 408 || status == 429 || status >= 500) {
+            return AUDD_LONGPOLL_RETRY;
+        }
+        return AUDD_LONGPOLL_TERMINAL; /* auth / other client error */
+    }
+    return AUDD_LONGPOLL_CONTINUE;
+}
+
+static void longpoll_sleep_ms(long ms)
+{
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+}
 
 struct audd_longpoll {
     volatile int closed;
@@ -102,7 +144,12 @@ audd_error_t audd_longpoll_run(audd_client_t *client,
         return AUDD_ERR_OUT_OF_MEMORY;
     }
 
+    long poll_timeout = audd_longpoll_poll_timeout(
+        client->options.standard_timeout_seconds, o.timeout);
+
     audd_error_t result_err = AUDD_OK;
+    int consecutive_failures = 0;
+    long backoff_ms = kBackoffStartMs;
     while (!handle->closed && !client->closed) {
         char timeout_buf[16];
         snprintf(timeout_buf, sizeof(timeout_buf), "%d", o.timeout);
@@ -118,16 +165,10 @@ audd_error_t audd_longpoll_run(audd_client_t *client,
         kv[k] = NULL;
 
         audd_http_response_t resp = {0};
-        int rc = audd_http_get(client, url, kv,
-                                client->options.standard_timeout_seconds,
-                                &resp);
-        if (rc != 0) {
-            emit_error(callbacks, AUDD_ERR_CONNECTION, audd_last_error_message(client));
-            result_err = AUDD_ERR_CONNECTION;
-            audd_http_response_free(&resp);
-            break;
-        }
-        if (resp.status >= 400) {
+        int rc = audd_http_get(client, url, kv, poll_timeout, &resp);
+
+        audd_longpoll_action_t action = audd_longpoll_classify_http(rc, resp.status);
+        if (action == AUDD_LONGPOLL_TERMINAL) {
             char *m = audd_aprintf("Longpoll endpoint returned HTTP %ld", resp.status);
             audd_client_set_error(client, m ? m : "longpoll http error", 0);
             audd_free(m);
@@ -136,17 +177,35 @@ audd_error_t audd_longpoll_run(audd_client_t *client,
             audd_http_response_free(&resp);
             break;
         }
-        if (resp.body == NULL || resp.body_len == 0) {
-            audd_client_set_error(client, "Longpoll response was empty", 0);
-            emit_error(callbacks, AUDD_ERR_SERIALIZATION, audd_last_error_message(client));
-            result_err = AUDD_ERR_SERIALIZATION;
+        if (action == AUDD_LONGPOLL_RETRY) {
+            /* Transient connection/timeout/5xx failure: back off and reconnect
+             * instead of tearing down the subscription. Surface a non-fatal
+             * notice so callers can observe the reconnect. */
             audd_http_response_free(&resp);
-            break;
+            if (++consecutive_failures > kMaxConsecutiveFailures) {
+                audd_client_set_error(client,
+                    "Longpoll gave up after repeated transient failures", 0);
+                emit_error(callbacks, AUDD_ERR_CONNECTION, audd_last_error_message(client));
+                result_err = AUDD_ERR_CONNECTION;
+                break;
+            }
+            emit_error(callbacks, AUDD_ERR_CONNECTION, audd_last_error_message(client));
+            if (handle->closed || client->closed) break;
+            longpoll_sleep_ms(backoff_ms);
+            backoff_ms = backoff_ms < kBackoffMaxMs / 2 ? backoff_ms * 2 : kBackoffMaxMs;
+            continue;
         }
-        if (is_keepalive(resp.json)) {
-            cJSON *ts = cJSON_GetObjectItemCaseSensitive(resp.json, "timestamp");
-            if (cJSON_IsNumber(ts)) {
-                since_time = (long)ts->valuedouble;
+
+        /* Got a usable 2xx/3xx response — reset the failure streak. */
+        consecutive_failures = 0;
+        backoff_ms = kBackoffStartMs;
+
+        if (resp.body == NULL || resp.body_len == 0 || is_keepalive(resp.json)) {
+            /* Empty or keepalive body: advance the cursor if present and poll
+             * again. */
+            if (resp.json) {
+                cJSON *ts = cJSON_GetObjectItemCaseSensitive(resp.json, "timestamp");
+                if (cJSON_IsNumber(ts)) since_time = (long)ts->valuedouble;
             }
             audd_http_response_free(&resp);
             continue;
@@ -156,13 +215,18 @@ audd_error_t audd_longpoll_run(audd_client_t *client,
         audd_stream_callback_notification_t *n = NULL;
         char *parse_err = NULL;
         audd_error_t pe = audd_parse_callback(resp.body, resp.body_len, &m, &n, &parse_err);
-        if (pe != AUDD_OK) {
-            audd_client_set_error(client, parse_err ? parse_err : "parse error", 0);
+        if (pe != AUDD_OK || (m == NULL && n == NULL)) {
+            /* Unrecognized or unparseable body is not fatal for a long-lived
+             * subscription — skip it and keep polling. */
             audd_free(parse_err);
-            emit_error(callbacks, pe, audd_last_error_message(client));
-            result_err = pe;
+            audd_stream_callback_match_free(m);
+            audd_stream_callback_notification_free(n);
+            if (resp.json) {
+                cJSON *ts = cJSON_GetObjectItemCaseSensitive(resp.json, "timestamp");
+                if (cJSON_IsNumber(ts)) since_time = (long)ts->valuedouble;
+            }
             audd_http_response_free(&resp);
-            break;
+            continue;
         }
         audd_free(parse_err);
         if (m && callbacks->on_match) {
