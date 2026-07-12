@@ -167,6 +167,7 @@ audd_error_t audd_sentinel_for_code(int code);
 const char *audd_json_get_string(const cJSON *obj, const char *key);
 int         audd_json_get_int(const cJSON *obj, const char *key, int def);
 int64_t     audd_json_get_int64(const cJSON *obj, const char *key, int64_t def);
+double      audd_json_get_double(const cJSON *obj, const char *key, double def);
 int         audd_json_has(const cJSON *obj, const char *key);
 int         audd_json_get_bool(const cJSON *obj, const char *key, int def);
 

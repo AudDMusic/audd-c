@@ -10,6 +10,7 @@ set(AUDD_TEST_FILES
     test_longpoll_category.c
     test_callback_parsing.c
     test_recognition_parsing.c
+    test_scalar_coercion.c
     test_enterprise_parsing.c
     test_extras.c
     test_retry_policy.c

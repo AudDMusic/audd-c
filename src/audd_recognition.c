@@ -273,6 +273,16 @@ audd_recognition_t *audd_recognition_from_json(const cJSON *result_obj)
     audd_recognition_t *r = (audd_recognition_t *)audd_malloc(sizeof(*r));
     if (r == NULL) return NULL;
     memset(r, 0, sizeof(*r));
+
+    /* Snapshot the raw block up front, before any lenient coercion mutates the
+     * parsed tree in place, so raw_response()/extras always reflect the exact
+     * wire types the server sent (e.g. a numeric "artist" stays a number here
+     * even though the typed getter renders it to a string). */
+    r->raw_obj = cJSON_Duplicate(result_obj, 1);
+    if (r->raw_obj != NULL) {
+        r->raw_response_str = cJSON_PrintUnformatted(r->raw_obj);
+    }
+
     r->timecode = strdup_or_null(audd_json_get_string(result_obj, "timecode"));
     r->artist = strdup_or_null(audd_json_get_string(result_obj, "artist"));
     r->title = strdup_or_null(audd_json_get_string(result_obj, "title"));
@@ -295,10 +305,6 @@ audd_recognition_t *audd_recognition_from_json(const cJSON *result_obj)
     r->napster = parse_napster(cJSON_GetObjectItemCaseSensitive((cJSON *)result_obj, "napster"));
     parse_musicbrainz(cJSON_GetObjectItemCaseSensitive((cJSON *)result_obj, "musicbrainz"), &r->mb);
 
-    r->raw_obj = cJSON_Duplicate(result_obj, 1);
-    if (r->raw_obj != NULL) {
-        r->raw_response_str = cJSON_PrintUnformatted(r->raw_obj);
-    }
     return r;
 }
 

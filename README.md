@@ -27,7 +27,7 @@ Drop the SDK into your CMake project via `FetchContent`:
 include(FetchContent)
 FetchContent_Declare(audd
     GIT_REPOSITORY https://github.com/AudDMusic/audd-c.git
-    GIT_TAG        v1.5.14
+    GIT_TAG        v1.5.15
 )
 FetchContent_MakeAvailable(audd)
 
