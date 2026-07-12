@@ -14,6 +14,8 @@ set(AUDD_TEST_FILES
     test_enterprise_parsing.c
     test_extras.c
     test_retry_policy.c
+    test_pre_upload_classification.c
+    test_post_upload_timeout.c
     test_param_dedup.c
     test_longpoll_resilience.c
     test_alloc_emulation.c
@@ -30,6 +32,9 @@ foreach(t ${AUDD_TEST_FILES})
         ${CMAKE_SOURCE_DIR}/vendor/cJSON
         ${CMAKE_SOURCE_DIR}/src
     )
+    if(CURL_INCLUDE_DIRS)
+        target_include_directories(${name} PRIVATE ${CURL_INCLUDE_DIRS})
+    endif()
     target_compile_features(${name} PRIVATE c_std_99)
     if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
         target_compile_options(${name} PRIVATE -Wall -Wextra -Wno-unused-parameter)

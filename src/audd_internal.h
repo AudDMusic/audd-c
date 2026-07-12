@@ -84,9 +84,31 @@ typedef enum {
 } audd_retry_class_t;
 
 /*
+ * audd_failure_is_pre_upload classifies a failed transfer: returns 1 only
+ * when the failure is known to have happened before any byte of the request
+ * body was sent, so retrying cannot re-submit work the server may have
+ * already performed (and billed).
+ *
+ *   curl_code           — the CURLcode from curl_easy_perform (as int)
+ *   uploaded_body_bytes — CURLINFO_SIZE_UPLOAD_T probe of the easy handle
+ *   http_status         — CURLINFO_RESPONSE_CODE probe (0 = no status line)
+ *
+ * Codes that can only occur before the transfer starts (DNS, connect, TLS
+ * handshake, malformed URL) are pre-upload regardless of the probes.
+ * Ambiguous codes (timeouts, send/recv errors, aborted transfers) are
+ * pre-upload only if zero body bytes were handed to the transport AND no
+ * HTTP status line came back. Exposed (rather than kept file-local) so the
+ * test suite can verify the classification table directly.
+ */
+int audd_failure_is_pre_upload(int curl_code,
+                               long long uploaded_body_bytes,
+                               long http_status);
+
+/*
  * Perform a POST with optional multipart form upload. `body_was_uploaded`
- * is set to 1 if the request reached the server (body uploaded); 0 if it
- * failed pre-upload (DNS / connect / TLS).
+ * is set to 0 only when the failure provably happened before any request-
+ * body byte was sent (see audd_failure_is_pre_upload); otherwise 1 — the
+ * server may have received the request, so a metered retry is not safe.
  */
 int audd_http_post(audd_client_t *client,
                    const char *url,

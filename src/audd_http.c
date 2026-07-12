@@ -110,21 +110,52 @@ static void apply_common_opts(audd_client_t *client, CURL *eh, long timeout_seco
     curl_easy_setopt(eh, CURLOPT_TCP_KEEPALIVE, 1L);
 }
 
-/* Map curl error codes to "did the body get uploaded?" — used to gate
- * recognition retries. Pre-upload codes mean the request never reached
- * the server's app layer. */
-static int curl_was_pre_upload(CURLcode rc)
+int audd_failure_is_pre_upload(int curl_code,
+                               long long uploaded_body_bytes,
+                               long http_status)
 {
-    switch (rc) {
+    switch ((CURLcode)curl_code) {
+    /* These can only occur before the transfer starts — the request body
+     * was never sent, so a retry cannot double-submit metered work. */
+    case CURLE_UNSUPPORTED_PROTOCOL:
+    case CURLE_URL_MALFORMAT:
     case CURLE_COULDNT_RESOLVE_PROXY:
     case CURLE_COULDNT_RESOLVE_HOST:
     case CURLE_COULDNT_CONNECT:
     case CURLE_SSL_CONNECT_ERROR:
-    case CURLE_OPERATION_TIMEDOUT: /* may also be post; conservative for retries */
+    case CURLE_PEER_FAILED_VERIFICATION:
+    case CURLE_SSL_CIPHER:
+    case CURLE_SSL_CACERT_BADFILE:
+    case CURLE_INTERFACE_FAILED:
         return 1;
     default:
-        return 0;
+        /* Ambiguous codes — CURLE_OPERATION_TIMEDOUT in particular can fire
+         * either while connecting or while waiting for the response after a
+         * completed upload. Classify as pre-upload only when the probes
+         * prove nothing was sent: zero request-body bytes handed to the
+         * transport and no HTTP status line received. */
+        return uploaded_body_bytes == 0 && http_status == 0;
     }
+}
+
+/* Probe the easy handle after a failed curl_easy_perform and classify the
+ * failure via audd_failure_is_pre_upload. `status` is the already-fetched
+ * CURLINFO_RESPONSE_CODE. */
+static int perform_failed_before_upload(CURL *eh, CURLcode rc, long status)
+{
+    long long uploaded = 0;
+#if LIBCURL_VERSION_NUM >= 0x073700 /* 7.55.0: CURLINFO_SIZE_UPLOAD_T */
+    curl_off_t uploaded_t = 0;
+    if (curl_easy_getinfo(eh, CURLINFO_SIZE_UPLOAD_T, &uploaded_t) == CURLE_OK) {
+        uploaded = (long long)uploaded_t;
+    }
+#else
+    double uploaded_d = 0.0;
+    if (curl_easy_getinfo(eh, CURLINFO_SIZE_UPLOAD, &uploaded_d) == CURLE_OK) {
+        uploaded = (long long)uploaded_d;
+    }
+#endif
+    return audd_failure_is_pre_upload((int)rc, uploaded, status);
 }
 
 int audd_http_post(audd_client_t *client,
@@ -203,7 +234,9 @@ int audd_http_post(audd_client_t *client,
     curl_easy_getinfo(eh, CURLINFO_RESPONSE_CODE, &status);
 
     if (rc != CURLE_OK) {
-        if (body_was_uploaded) *body_was_uploaded = curl_was_pre_upload(rc) ? 0 : 1;
+        if (body_was_uploaded) {
+            *body_was_uploaded = perform_failed_before_upload(eh, rc, status) ? 0 : 1;
+        }
         char *msg = audd_aprintf("audd: connection error: %s", curl_easy_strerror(rc));
         audd_client_set_error(client, msg ? msg : "connection error", 0);
         audd_free(msg);
