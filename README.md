@@ -194,7 +194,7 @@ printf("Preview:     %s\n", OR_NONE(audd_recognition_preview_url(r)));
 ```
 
 Valid `return_metadata` values: `apple_music`, `spotify`, `deezer`,
-`napster`, `musicbrainz`. Each metadata-block accessor returns `NULL`
+`musicbrainz`. Each metadata-block accessor returns `NULL`
 when the corresponding block wasn't requested or wasn't returned.
 
 ### Reading additional metadata
