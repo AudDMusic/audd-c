@@ -308,7 +308,8 @@ audd_error_t audd_decode_or_raise(audd_client_t *client,
                 "Note: the custom-catalog endpoint is for adding songs to your "
                 "private fingerprint database, not for music recognition. If you "
                 "intended to identify music, use audd_recognize(...) (or "
-                "audd_recognize_enterprise(...) for files longer than 25 seconds) "
+                "audd_recognize_enterprise(...) to scan beyond the first 12 seconds "
+                "of a file) "
                 "instead.\n\nTo request custom-catalog access, contact "
                 "api@audd.io.\n\n[Server message: %s]",
                 msg);
