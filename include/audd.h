@@ -466,6 +466,14 @@ AUDD_API const char *audd_enterprise_match_get_song_link(const audd_enterprise_m
 AUDD_API int         audd_enterprise_match_get_start_offset(const audd_enterprise_match_t *m);
 AUDD_API int         audd_enterprise_match_get_end_offset(const audd_enterprise_match_t *m);
 
+/** Custom-catalog matches set audio_id; public-catalog matches set artist/title.
+ *  audd_enterprise_match_has_audio_id reports whether audio_id was returned.
+ *  audd_enterprise_match_get_audio_id returns its int value (0 when absent). */
+AUDD_API int         audd_enterprise_match_has_audio_id(const audd_enterprise_match_t *m);
+AUDD_API int         audd_enterprise_match_get_audio_id(const audd_enterprise_match_t *m);
+AUDD_API int         audd_enterprise_match_is_public_match(const audd_enterprise_match_t *m);
+AUDD_API int         audd_enterprise_match_is_custom_match(const audd_enterprise_match_t *m);
+
 /** Where the match plays in the user's file, in seconds (the chunk's position
  *  plus the fragment-relative offset). Returns -1.0 when unknown (the chunk
  *  carried no usable offset); real file positions are always >= 0. Precise

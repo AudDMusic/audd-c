@@ -203,6 +203,25 @@ double audd_json_get_double(const cJSON *obj, const char *key, double def)
     return def;
 }
 
+int audd_json_get_id(const cJSON *obj, const char *key, int *out)
+{
+    if (obj == NULL || out == NULL) return 0;
+    cJSON *it = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (it == NULL) return 0;
+    if (cJSON_IsNumber(it)) {
+        *out = (int)it->valuedouble; /* truncate toward 0 */
+        return 1;
+    }
+    if (cJSON_IsString(it)) {
+        int64_t v = 0;
+        if (parse_int_string(it->valuestring, &v)) {
+            *out = (int)v;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int audd_json_has(const cJSON *obj, const char *key)
 {
     return obj != NULL && cJSON_HasObjectItem((cJSON *)obj, key);

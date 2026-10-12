@@ -192,6 +192,10 @@ int64_t     audd_json_get_int64(const cJSON *obj, const char *key, int64_t def);
 double      audd_json_get_double(const cJSON *obj, const char *key, double def);
 int         audd_json_has(const cJSON *obj, const char *key);
 int         audd_json_get_bool(const cJSON *obj, const char *key, int def);
+/* Optional integer id: 1 + *out when obj[key] is a number or a numeric
+ * string; 0 when absent or not convertible (bools/containers/junk never
+ * produce a value). */
+int         audd_json_get_id(const cJSON *obj, const char *key, int *out);
 
 /* Get the printed JSON of `obj[key]` as a heap string ("string-quoted",
  * number, true/false, null, object, array). NULL if absent or OOM. */

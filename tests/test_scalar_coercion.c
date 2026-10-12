@@ -246,6 +246,55 @@ void test_enterprise_string_score_and_offsets(void)
     audd_enterprise_result_free(r);
 }
 
+void test_enterprise_string_audio_id(void)
+{
+    /* audio_id as a numeric string coerces; junk/bool degrade to absent. */
+    const char *json = "[{\"offset\":\"0:00\",\"songs\":["
+        "{\"score\":100,\"audio_id\":\"146\"},"
+        "{\"score\":100,\"audio_id\":\"not-a-number\",\"artist\":\"A\",\"title\":\"T\"},"
+        "{\"score\":100,\"audio_id\":true,\"artist\":\"A\",\"title\":\"T\"}]}]";
+    cJSON *obj = cJSON_Parse(json);
+    TEST_ASSERT_NOT_NULL(obj);
+    audd_enterprise_result_t *r = audd_enterprise_from_json(obj);
+    cJSON_Delete(obj);
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_EQUAL_INT(3, (int)audd_enterprise_result_count(r));
+
+    const audd_enterprise_match_t *m = audd_enterprise_result_at(r, 0);
+    TEST_ASSERT_TRUE(audd_enterprise_match_has_audio_id(m));
+    TEST_ASSERT_EQUAL_INT(146, audd_enterprise_match_get_audio_id(m));
+    TEST_ASSERT_TRUE(audd_enterprise_match_is_custom_match(m));
+
+    for (size_t i = 1; i < 3; ++i) {
+        m = audd_enterprise_result_at(r, i);
+        TEST_ASSERT_FALSE(audd_enterprise_match_has_audio_id(m));
+        TEST_ASSERT_EQUAL_INT(0, audd_enterprise_match_get_audio_id(m));
+        TEST_ASSERT_TRUE(audd_enterprise_match_is_public_match(m));
+    }
+    audd_enterprise_result_free(r);
+}
+
+void test_recognition_string_audio_id(void)
+{
+    cJSON *obj = cJSON_Parse("{\"timecode\":\"01:45\",\"audio_id\":\" 146 \"}");
+    TEST_ASSERT_NOT_NULL(obj);
+    audd_recognition_t *r = audd_recognition_from_json(obj);
+    cJSON_Delete(obj);
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_TRUE(audd_recognition_has_audio_id(r));
+    TEST_ASSERT_EQUAL_INT(146, audd_recognition_get_audio_id(r));
+    TEST_ASSERT_TRUE(audd_recognition_is_custom_match(r));
+    audd_recognition_free(r);
+
+    obj = cJSON_Parse("{\"audio_id\":\"junk\",\"artist\":\"A\"}");
+    r = audd_recognition_from_json(obj);
+    cJSON_Delete(obj);
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_FALSE(audd_recognition_has_audio_id(r));
+    TEST_ASSERT_TRUE(audd_recognition_is_public_match(r));
+    audd_recognition_free(r);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -276,5 +325,7 @@ int main(void)
 
     RUN_TEST(test_recognition_numeric_artist_renders_string);
     RUN_TEST(test_enterprise_string_score_and_offsets);
+    RUN_TEST(test_enterprise_string_audio_id);
+    RUN_TEST(test_recognition_string_audio_id);
     return UNITY_END();
 }

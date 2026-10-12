@@ -293,11 +293,7 @@ audd_recognition_t *audd_recognition_from_json(const cJSON *result_obj)
     r->isrc = strdup_or_null(audd_json_get_string(result_obj, "isrc"));
     r->upc = strdup_or_null(audd_json_get_string(result_obj, "upc"));
 
-    cJSON *audio_id = cJSON_GetObjectItemCaseSensitive((cJSON *)result_obj, "audio_id");
-    if (audio_id != NULL && cJSON_IsNumber(audio_id)) {
-        r->has_audio_id = 1;
-        r->audio_id = (int)audio_id->valuedouble;
-    }
+    r->has_audio_id = audd_json_get_id(result_obj, "audio_id", &r->audio_id);
 
     r->apple_music = parse_apple_music(cJSON_GetObjectItemCaseSensitive((cJSON *)result_obj, "apple_music"));
     r->spotify = parse_spotify(cJSON_GetObjectItemCaseSensitive((cJSON *)result_obj, "spotify"));

@@ -10,6 +10,8 @@
 
 struct audd_enterprise_match {
     int   score;
+    int   has_audio_id;
+    int   audio_id;
     char *timecode;
     char *artist;
     char *title;
@@ -107,6 +109,7 @@ static void match_from_json(audd_enterprise_match_t *m, const cJSON *o, double b
     m->start_seconds = -1.0;
     m->end_seconds = -1.0;
     m->score = audd_json_get_int(o, "score", 0);
+    m->has_audio_id = audd_json_get_id(o, "audio_id", &m->audio_id);
     m->timecode = strdup_or_null(audd_json_get_string(o, "timecode"));
     m->artist = strdup_or_null(audd_json_get_string(o, "artist"));
     m->title = strdup_or_null(audd_json_get_string(o, "title"));
@@ -216,6 +219,21 @@ GETTER_INT(start_offset)
 GETTER_INT(end_offset)
 GETTER_DBL(start_seconds)
 GETTER_DBL(end_seconds)
+
+int audd_enterprise_match_has_audio_id(const audd_enterprise_match_t *m)
+{ return m && m->has_audio_id; }
+int audd_enterprise_match_get_audio_id(const audd_enterprise_match_t *m)
+{ return m ? m->audio_id : 0; }
+
+int audd_enterprise_match_is_custom_match(const audd_enterprise_match_t *m)
+{ return m && m->has_audio_id; }
+
+int audd_enterprise_match_is_public_match(const audd_enterprise_match_t *m)
+{
+    if (m == NULL) return 0;
+    if (m->has_audio_id) return 0;
+    return (m->artist != NULL && m->artist[0]) || (m->title != NULL && m->title[0]);
+}
 
 static const char *provider_str(audd_provider_t p)
 {

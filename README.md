@@ -85,7 +85,10 @@ which returns multiple matches across the file's chunks. Each match
 carries the same core tags plus `score`, `start_seconds`, `end_seconds`,
 `start_offset`, `end_offset`, `isrc`, `upc`. Access to `isrc`, `upc`, and
 `score` requires a Startup plan or higher — [contact us](mailto:api@audd.io)
-for enterprise features.
+for enterprise features. A match from your [custom catalog](#custom-catalog-advanced)
+carries `audio_id` instead of artist/title: check
+`audd_enterprise_match_is_custom_match(m)` and read
+`audd_enterprise_match_get_audio_id(m)`.
 
 `start_seconds` and `end_seconds` tell you where the match plays in your
 file, in seconds; they are `-1.0` when unknown. They are precise because the

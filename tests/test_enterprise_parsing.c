@@ -124,6 +124,55 @@ void test_chunk_offset_to_seconds(void)
     audd_enterprise_result_free(r);
 }
 
+void test_custom_catalog_match_audio_id(void)
+{
+    /* Full enterprise response for a custom-catalog match (fixture
+     * enterprise_custom_match.json): audio_id instead of artist/title. */
+    const char *body = "{\"status\":\"success\",\"result\":[{\"songs\":[{"
+        "\"score\":100,\"timecode\":\"01:45\",\"audio_id\":146,"
+        "\"start_offset\":0,\"end_offset\":11960}],\"offset\":\"00:24\"}],"
+        "\"execution_time\":\"143.512004ms\"}";
+    cJSON *root = cJSON_Parse(body);
+    TEST_ASSERT_NOT_NULL(root);
+    audd_enterprise_result_t *r =
+        audd_enterprise_from_json(cJSON_GetObjectItemCaseSensitive(root, "result"));
+    cJSON_Delete(root);
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_EQUAL_INT(1, (int)audd_enterprise_result_count(r));
+
+    const audd_enterprise_match_t *m = audd_enterprise_result_at(r, 0);
+    TEST_ASSERT_NOT_NULL(m);
+    TEST_ASSERT_TRUE(audd_enterprise_match_has_audio_id(m));
+    TEST_ASSERT_EQUAL_INT(146, audd_enterprise_match_get_audio_id(m));
+    TEST_ASSERT_TRUE(audd_enterprise_match_is_custom_match(m));
+    TEST_ASSERT_FALSE(audd_enterprise_match_is_public_match(m));
+    TEST_ASSERT_EQUAL_STRING("01:45", audd_enterprise_match_get_timecode(m));
+    TEST_ASSERT_NULL(audd_enterprise_match_get_artist(m));
+    audd_enterprise_result_free(r);
+}
+
+void test_public_match_has_no_audio_id(void)
+{
+    const char *json = "[{\"songs\":[{\"score\":100,\"artist\":\"A\",\"title\":\"T\","
+        "\"isrc\":\"US001\",\"upc\":\"000\"}],\"offset\":\"0:00\"}]";
+    cJSON *obj = cJSON_Parse(json);
+    audd_enterprise_result_t *r = audd_enterprise_from_json(obj);
+    cJSON_Delete(obj);
+    const audd_enterprise_match_t *m = audd_enterprise_result_at(r, 0);
+    TEST_ASSERT_NOT_NULL(m);
+    TEST_ASSERT_FALSE(audd_enterprise_match_has_audio_id(m));
+    TEST_ASSERT_EQUAL_INT(0, audd_enterprise_match_get_audio_id(m));
+    TEST_ASSERT_FALSE(audd_enterprise_match_is_custom_match(m));
+    TEST_ASSERT_TRUE(audd_enterprise_match_is_public_match(m));
+    audd_enterprise_result_free(r);
+
+    /* NULL-safe getters. */
+    TEST_ASSERT_FALSE(audd_enterprise_match_has_audio_id(NULL));
+    TEST_ASSERT_EQUAL_INT(0, audd_enterprise_match_get_audio_id(NULL));
+    TEST_ASSERT_FALSE(audd_enterprise_match_is_custom_match(NULL));
+    TEST_ASSERT_FALSE(audd_enterprise_match_is_public_match(NULL));
+}
+
 void test_empty_result(void)
 {
     cJSON *obj = cJSON_CreateArray();
@@ -142,6 +191,8 @@ int main(void)
     RUN_TEST(test_thumbnail_url);
     RUN_TEST(test_song_without_score_parses);
     RUN_TEST(test_chunk_offset_to_seconds);
+    RUN_TEST(test_custom_catalog_match_audio_id);
+    RUN_TEST(test_public_match_has_no_audio_id);
     RUN_TEST(test_empty_result);
     return UNITY_END();
 }
