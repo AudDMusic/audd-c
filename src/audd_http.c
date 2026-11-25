@@ -1,4 +1,11 @@
 /* audd_http.c — libcurl-backed HTTP transport. */
+
+/* nanosleep is POSIX, not ISO C: a strict -std=c99 build with glibc declares
+ * it only when asked. macOS declares it either way. */
+#if !defined(_POSIX_C_SOURCE) && !defined(__APPLE__)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "audd_internal.h"
 
 #include <curl/curl.h>

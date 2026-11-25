@@ -58,14 +58,19 @@ void audd_free(void *ptr)
  *
  * To copy only the still-valid bytes on grow/shrink we must know the previous
  * allocation size, so emulated blocks carry a small size-prefix header. The
- * header is `max_align_t`-sized so the pointer we hand back stays maximally
- * aligned. Blocks allocated this way are ONLY reachable through audd_realloc
- * (both growth and freeing via size == 0), so the header layout never leaks
- * into audd_malloc/audd_free or into cJSON's own hooks.
+ * header is as strictly aligned as any basic type, so the pointer we hand
+ * back stays maximally aligned (C99 has no max_align_t; the union lists the
+ * types that carry the strictest alignment). Blocks allocated this way are
+ * ONLY reachable through audd_realloc (both growth and freeing via
+ * size == 0), so the header layout never leaks into audd_malloc/audd_free
+ * or into cJSON's own hooks.
  */
 typedef union {
     size_t        size;
-    max_align_t   align;
+    long long     align_ll;
+    long double   align_ld;
+    void         *align_ptr;
+    void        (*align_fn)(void);
 } audd_emu_header_t;
 
 static void *audd_emu_realloc(void *ptr, size_t size)

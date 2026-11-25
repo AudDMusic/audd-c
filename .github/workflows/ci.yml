@@ -30,6 +30,26 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  c99:
+    name: Ubuntu / gcc, strict C99
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev cmake
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_STANDARD=99 \
+              -DCMAKE_C_STANDARD_REQUIRED=ON \
+              -DCMAKE_C_EXTENSIONS=OFF \
+              -DCMAKE_C_FLAGS="-Werror=implicit-function-declaration"
+      - name: Build
+        run: cmake --build build -j
+
   macos:
     name: macOS / clang
     runs-on: macos-latest
