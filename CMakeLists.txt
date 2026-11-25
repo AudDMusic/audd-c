@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(audd
-    VERSION 1.5.18
+    VERSION 1.5.19
     LANGUAGES C
     DESCRIPTION "Official C SDK for the AudD music recognition API"
 )
@@ -13,7 +13,10 @@ option(AUDD_BUILD_STATIC   "Build static library"   ON)
 
 set(CMAKE_C_VISIBILITY_PRESET hidden)
 set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
-if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+# Default build type for a standalone build only: a project that pulls the
+# SDK in with FetchContent / add_subdirectory keeps its own.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR
+   AND NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
 endif()
 

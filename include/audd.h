@@ -83,13 +83,13 @@ AUDD_API void audd_set_allocator(const audd_allocator_t *alloc);
 typedef enum {
     AUDD_OK                          = 0,
     AUDD_ERR_AUTHENTICATION          = 1,  /* codes 900 / 901 / 903    */
-    AUDD_ERR_QUOTA                   = 2,  /* code 902                 */
+    AUDD_ERR_QUOTA                   = 2,  /* code 902 (see STREAM_LIMIT) */
     AUDD_ERR_SUBSCRIPTION            = 3,  /* codes 904 / 905          */
     AUDD_ERR_CUSTOM_CATALOG_ACCESS   = 4,  /* 904/905 in catalog ctx   */
     AUDD_ERR_INVALID_REQUEST         = 5,  /* 50 / 51 / 6xx / 7xx / 906 */
     AUDD_ERR_INVALID_AUDIO           = 6,  /* 300 / 400 / 500          */
     AUDD_ERR_RATE_LIMIT              = 7,  /* 611                      */
-    AUDD_ERR_STREAM_LIMIT            = 8,  /* 610                      */
+    AUDD_ERR_STREAM_LIMIT            = 8,  /* 610; 902 from audd_streams_add */
     AUDD_ERR_NOT_RELEASED            = 9,  /* 907                      */
     AUDD_ERR_BLOCKED                 = 10, /* 19 / 31337               */
     AUDD_ERR_NEEDS_UPDATE            = 11, /* 20                       */
@@ -99,7 +99,7 @@ typedef enum {
     AUDD_ERR_INVALID_ARGUMENT        = 15, /* SDK-side: bad arg        */
     AUDD_ERR_OUT_OF_MEMORY           = 16,
     AUDD_ERR_IO                      = 17, /* file open/read failure   */
-    AUDD_ERR_CLOSED                  = 18, /* client closed             */
+    AUDD_ERR_CLOSED                  = 18, /* client closed (audd_client_close) */
     AUDD_ERR_NOT_FOUND               = 19  /* no result for query      */
 } audd_error_t;
 
@@ -153,7 +153,7 @@ typedef struct audd_stream_callback_notification audd_stream_callback_notificati
 typedef struct audd_lyrics_list audd_lyrics_list_t;
 typedef struct audd_lyrics_result audd_lyrics_result_t;
 
-/** Active longpoll handle. See audd_longpoll_run / audd_longpoll_close. */
+/** Longpoll handle. See audd_longpoll_new / audd_longpoll_close. */
 typedef struct audd_longpoll audd_longpoll_t;
 
 /* ---------------------------------------------------------------------- *
@@ -194,10 +194,10 @@ AUDD_API audd_options_t audd_options_default(void);
  * request snapshots the token before building its body, so a rotation never
  * corrupts an in-flight request (it uses whichever token was current when it
  * started). The last-error / last-request-id state is likewise guarded; see
- * the accessor docs below for the exact returned-pointer lifetime. A
- * recognize / longpoll call running on one thread can be cancelled from
- * another via audd_client_close (terminal) or audd_longpoll_close (per
- * subscription).
+ * the accessor docs below for the exact returned-pointer lifetime. A call
+ * running on one thread can be cancelled from another with
+ * audd_client_close (every call on the client) or audd_longpoll_close (one
+ * longpoll subscription).
  *
  * Returns NULL only on out-of-memory.
  */
@@ -210,7 +210,19 @@ AUDD_API audd_client_t *audd_client_new_strict(const char *api_token,
                                                const audd_options_t *options,
                                                audd_error_t *err);
 
-/** Free the client and all resources. NULL-safe. */
+/**
+ * Cancel every call running on `client` and make later calls return
+ * AUDD_ERR_CLOSED. A running request is aborted within about a second; a
+ * call it cancels returns AUDD_ERR_CLOSED, and a running longpoll returns
+ * AUDD_OK. Safe to call from any thread while calls are running, and from a
+ * signal handler. Idempotent. Doesn't free the client: once every thread
+ * using it has returned, call audd_client_free.
+ */
+AUDD_API void audd_client_close(audd_client_t *client);
+
+/** Free the client and all resources. NULL-safe. No other thread may be
+ *  using the client: to stop calls running on other threads, call
+ *  audd_client_close and wait for those threads to return first. */
 AUDD_API void audd_client_free(audd_client_t *client);
 
 /** Rotate the API token. Returns AUDD_ERR_INVALID_ARGUMENT for NULL/empty
@@ -411,6 +423,9 @@ AUDD_API const char *audd_musicbrainz_get_score(const audd_musicbrainz_entry_t *
  * Recognition (long file — enterprise)                                     *
  * ---------------------------------------------------------------------- */
 
+/* Start from audd_enterprise_options_default(): a zero-initialised struct
+ * sends skip=0, every=0, limit=0, skip_first_seconds=0, use_timecode=false
+ * and accurate_offsets=false. */
 typedef struct {
     const char **return_metadata;
     /** Optional: -1 means "not set"; otherwise sent verbatim. */
@@ -482,6 +497,13 @@ AUDD_API int         audd_enterprise_match_is_custom_match(const audd_enterprise
 AUDD_API double      audd_enterprise_match_get_start_seconds(const audd_enterprise_match_t *m);
 AUDD_API double      audd_enterprise_match_get_end_seconds(const audd_enterprise_match_t *m);
 
+/** Read a field outside the typed surface (a metadata block requested via
+ *  return_metadata, or any new field) by JSON key: the field's raw JSON
+ *  (string-quoted, number, or object/array source). NULL when the key is
+ *  absent or has a typed getter above. Owned by the result. */
+AUDD_API const char *audd_enterprise_match_extra(const audd_enterprise_match_t *m,
+                                                 const char *key);
+
 /** Cover-art URL for lis.tn-hosted song_links; NULL otherwise. Borrowed. */
 AUDD_API const char *audd_enterprise_match_thumbnail_url(const audd_enterprise_match_t *m);
 
@@ -508,7 +530,12 @@ AUDD_API audd_error_t audd_streams_set_callback_url(audd_client_t *client,
 
 /**
  * Fetch the configured callback URL. Caller frees the returned string with
- * audd_string_free. Returns NULL into *out_url when none set on success.
+ * audd_string_free.
+ *
+ * When the account has no callback URL configured, the API answers with
+ * code 19: this returns AUDD_ERR_BLOCKED, audd_last_error_code() is 19, and
+ * the message says no callback URL is configured. On AUDD_OK, *out_url may
+ * still be NULL when the response carries no URL.
  */
 AUDD_API audd_error_t audd_streams_get_callback_url(audd_client_t *client,
                                                      char **out_url);
@@ -528,6 +555,8 @@ typedef struct {
     const char **extra_parameters;
 } audd_add_stream_request_t;
 
+/** Returns AUDD_ERR_STREAM_LIMIT when the account is at its stream limit
+ *  (the API answers 610, or 902 for addStream). */
 AUDD_API audd_error_t audd_streams_add(audd_client_t *client,
                                         const audd_add_stream_request_t *req);
 
@@ -597,6 +626,20 @@ AUDD_API const char *audd_stream_callback_song_get_song_link(const audd_stream_c
 AUDD_API const char *audd_stream_callback_song_get_isrc(const audd_stream_callback_song_t *s);
 AUDD_API const char *audd_stream_callback_song_get_upc(const audd_stream_callback_song_t *s);
 
+/** Custom-catalog matches carry audio_id instead of artist/title.
+ *  audd_stream_callback_song_has_audio_id reports whether it was returned;
+ *  audd_stream_callback_song_get_audio_id returns it (0 when absent). */
+AUDD_API int         audd_stream_callback_song_has_audio_id(const audd_stream_callback_song_t *s);
+AUDD_API int         audd_stream_callback_song_get_audio_id(const audd_stream_callback_song_t *s);
+
+/** Read a field outside the typed surface by JSON key — for example the
+ *  "apple_music" or "spotify" block requested via the callback URL's
+ *  return_metadata: the field's raw JSON (string-quoted, number, or
+ *  object/array source). NULL when the key is absent or has a typed getter
+ *  above. Owned by the parent match. */
+AUDD_API const char *audd_stream_callback_song_extra(const audd_stream_callback_song_t *s,
+                                                     const char *key);
+
 /* Stream callback notification getters. */
 AUDD_API int         audd_stream_callback_notification_get_radio_id(const audd_stream_callback_notification_t *n);
 /** -1 absent, 0 false, 1 true. */
@@ -632,22 +675,52 @@ AUDD_API audd_error_t audd_streams_derive_longpoll_category(const audd_client_t 
  * Streams: longpoll consumer (callback-driven)                             *
  * ---------------------------------------------------------------------- *
  *
- * C is synchronous — there's no idiomatic equivalent of Go's three typed
- * channels. Instead, a longpoll subscription is driven by registering
- * three callback functions:
+ * A longpoll subscription runs on the calling thread and reports through
+ * callback functions:
  *
- *   - on_match(match, ud)        — fired once per recognition event
- *   - on_notification(notif, ud) — fired once per stream-lifecycle event
- *   - on_error(err, msg, ud)     — fired exactly once at termination
+ *   - on_match(match, ud)        — once per recognition event
+ *   - on_notification(notif, ud) — once per stream-lifecycle event
+ *   - on_error(err, msg, ud)     — once, when the run ends with an error
  *
- * audd_longpoll_run blocks the calling thread until either:
- *   - a terminal error fires (on_error then returns), OR
- *   - audd_longpoll_close is called from another thread.
+ * and, optionally, through an on_retry callback set on a handle (see
+ * audd_longpoll_set_on_retry).
  *
- * The handle written to *out_handle is the only argument
- * audd_longpoll_close accepts. It's safe to close from any thread; the
- * close is idempotent. Once audd_longpoll_run returns, the handle is no
- * longer valid — do not call audd_longpoll_close on it after.
+ * Each poll is GET https://api.audd.io/longpoll/ with the category, the
+ * timeout and since_time; it carries no api_token, since the category
+ * authorizes it. The server answers with a list of events, a "no events
+ * before timeout" response, or an error:
+ *
+ *   - Events are delivered in order. An event's data is the body a
+ *     callback URL receives; an event whose data doesn't parse, or whose
+ *     recognition has no songs, is skipped. The next request asks only for
+ *     events newer than the newest one.
+ *   - A timeout response delivers nothing; its timestamp becomes the next
+ *     since_time.
+ *   - An error response (for example a timeout outside 1-120) ends the run:
+ *     on_error gets AUDD_ERR_INVALID_REQUEST with the server's text, or the
+ *     sentinel of the AudD error code it carries.
+ *   - A response with nothing new in it (an empty events list, an unknown
+ *     shape, an empty or non-JSON body) is followed by a pause that starts
+ *     at 1 second and doubles up to 30 seconds.
+ *   - Network failures and HTTP 408/429/5xx are retried after the same kind
+ *     of pause, reported through on_retry; after 8 in a row, the next one
+ *     ends the run through on_error. Other HTTP errors end the run.
+ *
+ * Closing ends the run with AUDD_OK and without on_error: call
+ * audd_longpoll_close on the handle, or audd_client_close on the client,
+ * from any thread or from a signal handler. A close interrupts a pause and
+ * a waiting request within about a second.
+ *
+ * The message passed to on_error and on_retry is valid only during the
+ * call. Callbacks run on the thread that runs the longpoll.
+ *
+ * Handles: audd_longpoll_new creates a handle the caller owns, to pass to
+ * audd_longpoll_run_with_handle; it stays valid until audd_longpoll_free,
+ * so it can be closed at any time, including after the run has returned.
+ * audd_longpoll_run instead creates a handle for the length of the run and
+ * frees it on return; closing that handle races with the run ending, so
+ * prefer a caller-owned handle when another thread or a signal handler
+ * closes the subscription.
  */
 
 typedef void (*audd_on_match_fn)(const audd_stream_callback_match_t *match, void *ud);
@@ -662,34 +735,67 @@ typedef struct {
 } audd_longpoll_callbacks_t;
 
 typedef struct {
-    /** Unix timestamp to resume from. 0 = "start from now". */
+    /** Server timestamp in milliseconds since the Unix epoch, as carried by
+     *  an earlier longpoll response: only newer events are delivered.
+     *  0 = start from now. */
     long since_time;
-    /** Server-side longpoll wait in seconds. Default 50. */
+    /** How long, in seconds, the server holds each request open waiting for
+     *  events: 1 to 120. 0 or less means 50. */
     int  timeout;
-    /** Set to 1 to skip the "callback URL configured?" preflight. */
+    /** Set to 1 to skip the "callback URL configured?" preflight. A client
+     *  without an api_token skips it in any case. */
     int  skip_callback_check;
 } audd_longpoll_options_t;
 
 AUDD_API audd_longpoll_options_t audd_longpoll_options_default(void);
 
+/** Create a longpoll handle owned by the caller. NULL on out-of-memory. One
+ *  run at a time per handle; once closed, a handle stays closed. */
+AUDD_API audd_longpoll_t *audd_longpoll_new(void);
+
+/** Free a handle from audd_longpoll_new. NULL-safe. Not while a run is using
+ *  it: close it and wait for the run to return first. */
+AUDD_API void audd_longpoll_free(audd_longpoll_t *handle);
+
+/** Report each failure the loop retries (a network error, HTTP 408/429/5xx)
+ *  to `on_retry`, with the callbacks' user_data, before the pause. NULL
+ *  turns it off. Set it before the run starts. */
+AUDD_API void audd_longpoll_set_on_retry(audd_longpoll_t *handle,
+                                         audd_on_error_fn on_retry);
+
 /**
- * Block this thread polling `category` for stream events. Calls back the
- * given functions for each event. Returns when a terminal error fires or
- * when audd_longpoll_close is called from another thread.
+ * Block this thread polling `category` for stream events, using a handle
+ * from audd_longpoll_new; see the section comment above for what the loop
+ * does. Returns AUDD_OK when closed, or the error on_error received.
  *
- * Resilience: transient failures (connection/timeout/5xx) do not end the
- * subscription — the loop reconnects with bounded exponential backoff, and
- * each transient failure is reported through on_error as a non-fatal notice
- * before the retry. Unrecognized or unparseable poll bodies are skipped and
- * polling continues. Only authentication/API errors and audd_longpoll_close
- * are terminal.
+ * Unless options->skip_callback_check is set or the client has no
+ * api_token, the run first checks that the account has a callback URL
+ * configured (without one, longpoll never delivers events) and ends with
+ * AUDD_ERR_INVALID_REQUEST if it hasn't.
  *
- * options may be NULL.
- *
- * If out_handle is non-NULL, the handle for audd_longpoll_close is written
- * to it BEFORE the first poll request — the caller can safely stash it for
- * an external close trigger. After audd_longpoll_run returns, the handle
- * is freed; do not access it.
+ * options may be NULL. Returns AUDD_ERR_INVALID_ARGUMENT, without calling
+ * on_error, when handle, client, category or callbacks is NULL.
+ */
+AUDD_API audd_error_t audd_longpoll_run_with_handle(audd_longpoll_t *handle,
+                                                    audd_client_t *client,
+                                                    const char *category,
+                                                    const audd_longpoll_options_t *options,
+                                                    const audd_longpoll_callbacks_t *callbacks);
+
+/** audd_longpoll_run_with_handle keyed on radio_id: derives the category from
+ *  the client's api_token and radio_id. Ends with AUDD_ERR_AUTHENTICATION
+ *  (through on_error) when the client has no api_token. */
+AUDD_API audd_error_t audd_longpoll_run_by_radio_id_with_handle(audd_longpoll_t *handle,
+                                                                audd_client_t *client,
+                                                                int radio_id,
+                                                                const audd_longpoll_options_t *options,
+                                                                const audd_longpoll_callbacks_t *callbacks);
+
+/**
+ * audd_longpoll_run_with_handle with a handle that lives for the length of
+ * the run. If out_handle is non-NULL, the handle is written to it before
+ * the first request, for audd_longpoll_close, and set back to NULL when the
+ * run returns; the handle is freed then, so don't use it afterwards.
  */
 AUDD_API audd_error_t audd_longpoll_run(audd_client_t *client,
                                          const char *category,
@@ -707,10 +813,9 @@ AUDD_API audd_error_t audd_longpoll_run(audd_client_t *client,
  * the token must stay server-side and only the category travels to a
  * tokenless consumer (browser/widget/embedded).
  *
- * Returns AUDD_ERR_AUTHENTICATION if the client was constructed without
- * an api_token. All other semantics — preflight callback URL check,
- * blocking behavior, callback dispatch, close handle — match
- * audd_longpoll_run exactly.
+ * Ends with AUDD_ERR_AUTHENTICATION (through on_error) if the client was
+ * constructed without an api_token. Everything else matches
+ * audd_longpoll_run.
  */
 AUDD_API audd_error_t audd_longpoll_run_by_radio_id(audd_client_t *client,
                                                      int radio_id,
@@ -718,8 +823,8 @@ AUDD_API audd_error_t audd_longpoll_run_by_radio_id(audd_client_t *client,
                                                      const audd_longpoll_callbacks_t *callbacks,
                                                      audd_longpoll_t **out_handle);
 
-/** Trigger a graceful close on a running longpoll. Idempotent.
- *  May be called from any thread. */
+/** Close a longpoll: the run returns AUDD_OK. Idempotent. Safe from any
+ *  thread and from a signal handler (it only sets a flag). NULL-safe. */
 AUDD_API void audd_longpoll_close(audd_longpoll_t *handle);
 
 /* ---------------------------------------------------------------------- *
@@ -732,9 +837,20 @@ AUDD_API void audd_longpoll_close(audd_longpoll_t *handle);
  * contact api@audd.io.
  */
 
+/**
+ * Add a song from `source`: an HTTP URL (http:// or https://), which the
+ * server downloads, or an existing local file path, which is uploaded.
+ *
+ * Sent once and never retried automatically: check the error before sending
+ * it again (an upload to an audio_id that already holds a song replaces it).
+ * Returns AUDD_ERR_CUSTOM_CATALOG_ACCESS when the token lacks access.
+ */
 AUDD_API audd_error_t audd_custom_catalog_add(audd_client_t *client,
                                                 int audio_id,
                                                 const char *source);
+
+/** Add a song from in-memory bytes; the buffer can be freed once the call
+ *  returns. Same retry rule as audd_custom_catalog_add. */
 
 AUDD_API audd_error_t audd_custom_catalog_add_bytes(audd_client_t *client,
                                                      int audio_id,

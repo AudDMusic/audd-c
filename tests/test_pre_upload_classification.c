@@ -1,7 +1,8 @@
 /* test_pre_upload_classification.c — pre-upload failure classification.
  *
- * Recognition and mutating requests are metered; the retry layer may only
- * re-send them when the failure provably happened before any request-body
+ * Recognition requests are metered and mutating requests change state; the
+ * retry layer may only re-send them when the failure provably happened
+ * before any request-body
  * byte reached the server. audd_failure_is_pre_upload gates that decision:
  * unambiguous pre-transfer CURLcodes (DNS, connect, TLS handshake, malformed
  * URL) are always pre-upload, while ambiguous codes (timeouts, send/recv

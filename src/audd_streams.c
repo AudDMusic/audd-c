@@ -8,8 +8,6 @@
 
 #include "../vendor/cJSON/cJSON.h"
 
-static const char *kApiBase = "https://api.audd.io";
-
 struct audd_stream {
     int   radio_id;
     char *url;
@@ -35,7 +33,7 @@ static int streams_attempt(audd_client_t *client,
                             void *ud)
 {
     streams_post_ctx_t *ctx = (streams_post_ctx_t *)ud;
-    char *url = audd_aprintf("%s%s", kApiBase, ctx->path);
+    char *url = audd_aprintf("%s%s", audd_client_api_base(client), ctx->path);
     if (url == NULL) return -1;
     audd_http_form_t form = {0};
     form.fields = ctx->fields;
@@ -46,22 +44,27 @@ static int streams_attempt(audd_client_t *client,
     return rc;
 }
 
+/* out_code (may be NULL) receives the AudD numeric code of an API error,
+ * 0 otherwise. */
 static audd_error_t streams_post(audd_client_t *client,
                                   const char *path,
                                   const char **fields,
                                   audd_retry_class_t class,
-                                  cJSON **out_result)
+                                  cJSON **out_result,
+                                  int *out_code)
 {
     if (out_result) *out_result = NULL;
+    if (out_code) *out_code = 0;
     streams_post_ctx_t ctx = { path, fields };
     audd_http_response_t resp = {0};
     int rc = audd_retry_do(client, class, streams_attempt, &ctx, &resp);
     if (rc != 0) {
         audd_http_response_free(&resp);
-        return AUDD_ERR_CONNECTION;
+        return audd_transport_error(client);
     }
     audd_error_t derr = audd_decode_or_raise(client, &resp, 0);
     if (derr != AUDD_OK) {
+        if (out_code) *out_code = audd_response_error_code(resp.json);
         audd_http_response_free(&resp);
         return derr;
     }
@@ -110,26 +113,56 @@ audd_error_t audd_streams_set_callback_url(audd_client_t *client,
     fields[f++] = "url";
     fields[f++] = final_url;
     fields[f] = NULL;
-    e = streams_post(client, "/setCallbackUrl/", fields, AUDD_RETRY_MUTATING, NULL);
+    e = streams_post(client, "/setCallbackUrl/", fields, AUDD_RETRY_MUTATING, NULL, NULL);
     audd_free((void *)fields);
     audd_free(final_url);
     return e;
 }
 
-audd_error_t audd_streams_get_callback_url(audd_client_t *client, char **out_url)
+audd_error_t audd_streams_get_callback_url_ex(audd_client_t *client,
+                                              char **out_url,
+                                              int *out_code)
 {
+    if (out_code) *out_code = 0;
     if (client == NULL || out_url == NULL) return AUDD_ERR_INVALID_ARGUMENT;
     *out_url = NULL;
     cJSON *result = NULL;
     const char *fields[] = { NULL };
-    audd_error_t e = streams_post(client, "/getCallbackUrl/", fields, AUDD_RETRY_READ, &result);
-    if (e != AUDD_OK) return e;
+    int code = 0;
+    audd_error_t e = streams_post(client, "/getCallbackUrl/", fields, AUDD_RETRY_READ,
+                                  &result, &code);
+    if (out_code) *out_code = code;
+    if (e != AUDD_OK) {
+        if (code == AUDD_NO_CALLBACK_URL_CODE) {
+            /* The API answers code 19 when the account has no callback URL
+             * configured; say so, and keep the server's text in case the 19
+             * means something else (19 also covers maintenance and blocks). */
+            char *server_msg = audd_strdup(audd_last_error_message(client));
+            char *m = audd_aprintf(
+                "audd: no callback URL is configured for this account; set one with "
+                "audd_streams_set_callback_url. [Server message: %s]",
+                server_msg ? server_msg : "");
+            if (m != NULL) audd_client_set_error(client, m, code);
+            audd_free(m);
+            audd_free(server_msg);
+        }
+        return e;
+    }
     if (result != NULL && cJSON_IsString(result) && result->valuestring != NULL) {
         *out_url = audd_strdup(result->valuestring);
     }
     if (result) cJSON_Delete(result);
     return AUDD_OK;
 }
+
+audd_error_t audd_streams_get_callback_url(audd_client_t *client, char **out_url)
+{
+    return audd_streams_get_callback_url_ex(client, out_url, NULL);
+}
+
+/* The API answers addStream with this code when the account is at its stream
+ * limit; everywhere else 902 means the token's request quota. */
+static const int kStreamLimitOnAddCode = 902;
 
 audd_error_t audd_streams_add(audd_client_t *client, const audd_add_stream_request_t *req)
 {
@@ -156,8 +189,10 @@ audd_error_t audd_streams_add(audd_client_t *client, const audd_add_stream_reque
         fields[f++] = "callbacks"; fields[f++] = req->callbacks;
     }
     fields[f] = NULL;
-    audd_error_t e = streams_post(client, "/addStream/", fields, AUDD_RETRY_MUTATING, NULL);
+    int code = 0;
+    audd_error_t e = streams_post(client, "/addStream/", fields, AUDD_RETRY_MUTATING, NULL, &code);
     audd_free((void *)fields);
+    if (e != AUDD_OK && code == kStreamLimitOnAddCode) return AUDD_ERR_STREAM_LIMIT;
     return e;
 }
 
@@ -166,7 +201,7 @@ audd_error_t audd_streams_set_url(audd_client_t *client, int radio_id, const cha
     if (client == NULL || url == NULL) return AUDD_ERR_INVALID_ARGUMENT;
     char rid_buf[16]; snprintf(rid_buf, sizeof(rid_buf), "%d", radio_id);
     const char *fields[] = { "radio_id", rid_buf, "url", url, NULL };
-    return streams_post(client, "/setStreamUrl/", fields, AUDD_RETRY_MUTATING, NULL);
+    return streams_post(client, "/setStreamUrl/", fields, AUDD_RETRY_MUTATING, NULL, NULL);
 }
 
 audd_error_t audd_streams_delete(audd_client_t *client, int radio_id)
@@ -174,7 +209,7 @@ audd_error_t audd_streams_delete(audd_client_t *client, int radio_id)
     if (client == NULL) return AUDD_ERR_INVALID_ARGUMENT;
     char rid_buf[16]; snprintf(rid_buf, sizeof(rid_buf), "%d", radio_id);
     const char *fields[] = { "radio_id", rid_buf, NULL };
-    return streams_post(client, "/deleteStream/", fields, AUDD_RETRY_MUTATING, NULL);
+    return streams_post(client, "/deleteStream/", fields, AUDD_RETRY_MUTATING, NULL, NULL);
 }
 
 audd_error_t audd_streams_list(audd_client_t *client, audd_stream_list_t **out_list)
@@ -183,7 +218,7 @@ audd_error_t audd_streams_list(audd_client_t *client, audd_stream_list_t **out_l
     *out_list = NULL;
     cJSON *result = NULL;
     const char *fields[] = { NULL };
-    audd_error_t e = streams_post(client, "/getStreams/", fields, AUDD_RETRY_READ, &result);
+    audd_error_t e = streams_post(client, "/getStreams/", fields, AUDD_RETRY_READ, &result, NULL);
     if (e != AUDD_OK) return e;
     audd_stream_list_t *list = (audd_stream_list_t *)audd_malloc(sizeof(*list));
     if (list == NULL) {

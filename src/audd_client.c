@@ -102,13 +102,49 @@ audd_client_t *audd_client_new_strict(const char *api_token,
     return c;
 }
 
+void audd_client_close(audd_client_t *client)
+{
+    if (client == NULL) return;
+    AUDD_FLAG_SET(&client->closed);
+}
+
+int audd_client_is_closed(audd_client_t *client)
+{
+    return client != NULL && AUDD_FLAG_GET(&client->closed) != 0;
+}
+
+audd_error_t audd_transport_error(audd_client_t *client)
+{
+    return audd_client_is_closed(client) ? AUDD_ERR_CLOSED : AUDD_ERR_CONNECTION;
+}
+
+const char *audd_client_api_base(const audd_client_t *client)
+{
+    if (client != NULL && client->api_base != NULL) return client->api_base;
+    return "https://api.audd.io";
+}
+
+audd_error_t audd_client_set_api_base_for_testing(audd_client_t *client, const char *base)
+{
+    if (client == NULL) return AUDD_ERR_INVALID_ARGUMENT;
+    char *copy = NULL;
+    if (base != NULL) {
+        copy = audd_strdup(base);
+        if (copy == NULL) return AUDD_ERR_OUT_OF_MEMORY;
+    }
+    audd_free(client->api_base);
+    client->api_base = copy;
+    return AUDD_OK;
+}
+
 void audd_client_free(audd_client_t *client)
 {
     if (client == NULL) return;
-    client->closed = 1;
+    AUDD_FLAG_SET(&client->closed);
     audd_free(client->api_token);
     audd_free(client->user_agent);
     audd_free(client->ca_bundle_path);
+    audd_free(client->api_base);
     audd_free(client->last_error_message);
     audd_free(client->last_request_id);
     pthread_mutex_destroy(&client->lock);

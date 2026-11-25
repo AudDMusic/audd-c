@@ -9,6 +9,9 @@
 
 struct audd_stream_callback_song {
     int   score;
+    int   has_audio_id;
+    int   audio_id;
+    cJSON *raw;   /* the song object as received, for _extra */
     char *artist;
     char *title;
     char *album;
@@ -44,7 +47,11 @@ static void parse_song(audd_stream_callback_song_t *out, const cJSON *o)
 {
     memset(out, 0, sizeof(*out));
     if (!cJSON_IsObject(o)) return;
+    /* Copy before the getters below coerce wrong-typed fields in place, so
+     * _extra returns the wire types. NULL on OOM: _extra then finds nothing. */
+    out->raw = cJSON_Duplicate(o, 1);
     out->score = audd_json_get_int(o, "score", 0);
+    out->has_audio_id = audd_json_get_id(o, "audio_id", &out->audio_id);
     out->artist = sdup(audd_json_get_string(o, "artist"));
     out->title = sdup(audd_json_get_string(o, "title"));
     out->album = sdup(audd_json_get_string(o, "album"));
@@ -65,6 +72,7 @@ static void free_song_inner(audd_stream_callback_song_t *s)
     audd_free(s->song_link);
     audd_free(s->isrc);
     audd_free(s->upc);
+    if (s->raw) cJSON_Delete(s->raw);
     memset(s, 0, sizeof(*s));
 }
 
@@ -199,6 +207,20 @@ const char *audd_stream_callback_match_raw_response(const audd_stream_callback_m
 
 int audd_stream_callback_song_get_score(const audd_stream_callback_song_t *s)
 { return s ? s->score : 0; }
+int audd_stream_callback_song_has_audio_id(const audd_stream_callback_song_t *s)
+{ return s && s->has_audio_id; }
+int audd_stream_callback_song_get_audio_id(const audd_stream_callback_song_t *s)
+{ return s ? s->audio_id : 0; }
+
+const char *audd_stream_callback_song_extra(const audd_stream_callback_song_t *s,
+                                            const char *key)
+{
+    static const char *const typed[] = {
+        "score", "audio_id", "artist", "title", "album", "release_date", "label",
+        "song_link", "isrc", "upc", NULL
+    };
+    return s ? audd_json_extra(s->raw, key, typed) : NULL;
+}
 SONG_GETTER_STR(artist)
 SONG_GETTER_STR(title)
 SONG_GETTER_STR(album)

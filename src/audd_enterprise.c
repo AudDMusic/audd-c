@@ -31,6 +31,7 @@ struct audd_enterprise_match {
     char *streaming_urls[5];      /* lazy */
     int   thumb_lazy;
     int   stream_lazy[5];
+    cJSON *raw;   /* the match object as received, for _extra */
 };
 
 struct audd_enterprise_result {
@@ -101,6 +102,7 @@ static void match_free_inner(audd_enterprise_match_t *m)
     audd_free(m->song_link);
     audd_free(m->thumbnail_url);
     for (int i = 0; i < 5; ++i) audd_free(m->streaming_urls[i]);
+    if (m->raw) cJSON_Delete(m->raw);
 }
 
 static void match_from_json(audd_enterprise_match_t *m, const cJSON *o, double base)
@@ -108,6 +110,9 @@ static void match_from_json(audd_enterprise_match_t *m, const cJSON *o, double b
     memset(m, 0, sizeof(*m));
     m->start_seconds = -1.0;
     m->end_seconds = -1.0;
+    /* Copy before the getters below coerce wrong-typed fields in place, so
+     * _extra returns the wire types. NULL on OOM: _extra then finds nothing. */
+    m->raw = cJSON_Duplicate(o, 1);
     m->score = audd_json_get_int(o, "score", 0);
     m->has_audio_id = audd_json_get_id(o, "audio_id", &m->audio_id);
     m->timecode = strdup_or_null(audd_json_get_string(o, "timecode"));
@@ -228,6 +233,15 @@ int audd_enterprise_match_get_audio_id(const audd_enterprise_match_t *m)
 int audd_enterprise_match_is_custom_match(const audd_enterprise_match_t *m)
 { return m && m->has_audio_id; }
 
+const char *audd_enterprise_match_extra(const audd_enterprise_match_t *m, const char *key)
+{
+    static const char *const typed[] = {
+        "score", "audio_id", "timecode", "artist", "title", "album", "release_date",
+        "label", "isrc", "upc", "song_link", "start_offset", "end_offset", NULL
+    };
+    return m ? audd_json_extra(m->raw, key, typed) : NULL;
+}
+
 int audd_enterprise_match_is_public_match(const audd_enterprise_match_t *m)
 {
     if (m == NULL) return 0;
@@ -235,16 +249,18 @@ int audd_enterprise_match_is_public_match(const audd_enterprise_match_t *m)
     return (m->artist != NULL && m->artist[0]) || (m->title != NULL && m->title[0]);
 }
 
-static const char *provider_str(audd_provider_t p)
+/* The lis.tn `?<key>` redirect key for a provider; NULL when lis.tn has no
+ * redirect for it. */
+static const char *lis_tn_key(audd_provider_t p)
 {
     switch (p) {
     case AUDD_PROVIDER_SPOTIFY: return "spotify";
-    case AUDD_PROVIDER_APPLE_MUSIC: return "apple_music";
+    case AUDD_PROVIDER_APPLE_MUSIC: return "apple";
     case AUDD_PROVIDER_DEEZER: return "deezer";
-    case AUDD_PROVIDER_NAPSTER: return "napster";
+    case AUDD_PROVIDER_NAPSTER: return NULL;
     case AUDD_PROVIDER_YOUTUBE: return "youtube";
     }
-    return "";
+    return NULL;
 }
 
 const char *audd_enterprise_match_thumbnail_url(const audd_enterprise_match_t *m)
@@ -266,8 +282,9 @@ const char *audd_enterprise_match_streaming_url(const audd_enterprise_match_t *m
     audd_enterprise_match_t *mm = (audd_enterprise_match_t *)m;
     if (mm->stream_lazy[p]) return mm->streaming_urls[p];
     mm->stream_lazy[p] = 1;
-    if (!audd_url_hostname_is(mm->song_link, "lis.tn")) return NULL;
+    const char *key = lis_tn_key(p);
+    if (key == NULL || !audd_url_hostname_is(mm->song_link, "lis.tn")) return NULL;
     char sep = (strchr(mm->song_link, '?') == NULL) ? '?' : '&';
-    mm->streaming_urls[p] = audd_aprintf("%s%c%s", mm->song_link, sep, provider_str(p));
+    mm->streaming_urls[p] = audd_aprintf("%s%c%s", mm->song_link, sep, key);
     return mm->streaming_urls[p];
 }

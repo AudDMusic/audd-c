@@ -1,6 +1,6 @@
 /* test_retry_policy.c — verify retry classification.
  *
- * Custom-catalog upload is metered; auto-retry could double-charge. The
+ * Custom-catalog uploads are never retried automatically: the
  * audd_custom_catalog_add* functions use AUDD_RETRY_NONE, which guarantees
  * exactly one attempt regardless of outcome. These tests exercise the
  * underlying audd_retry_do runner with a fake attempt function so we can

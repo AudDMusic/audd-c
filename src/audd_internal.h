@@ -34,6 +34,22 @@ char  *audd_strndup(const char *s, size_t n);
 char *audd_aprintf(const char *fmt, ...);
 
 /* ------------------------------------------------------------------ *
+ * Cancellation flags                                                  *
+ *                                                                     *
+ * An int set to 1 from any thread, or from a signal handler, and read *
+ * by the thread running a request. Lock-free atomics where the        *
+ * compiler has them, so setting one is async-signal-safe.             *
+ * ------------------------------------------------------------------ */
+
+#if defined(__GNUC__) || defined(__clang__)
+#  define AUDD_FLAG_SET(p) __atomic_store_n((p), 1, __ATOMIC_SEQ_CST)
+#  define AUDD_FLAG_GET(p) __atomic_load_n((p), __ATOMIC_SEQ_CST)
+#else
+#  define AUDD_FLAG_SET(p) (*(p) = 1)
+#  define AUDD_FLAG_GET(p) (*(p))
+#endif
+
+/* ------------------------------------------------------------------ *
  * String slice (for raw JSON capture, etc).                           *
  * ------------------------------------------------------------------ */
 
@@ -124,6 +140,30 @@ int audd_http_get(audd_client_t *client,
                   audd_http_response_t *resp);
 
 /*
+ * audd_http_get with two extras for the longpoll consumer:
+ *   cancel  — optional flag (see AUDD_FLAG_SET); when it becomes 1 the
+ *             request is aborted, like audd_client_close aborts every
+ *             request on the client.
+ *   errbuf  — optional buffer that receives the transport error message
+ *             on failure, so the caller doesn't have to read it back from
+ *             the client's shared last-error state.
+ * Sends no api_token: the query string is exactly query_kv.
+ */
+int audd_http_get_ex(audd_client_t *client,
+                     const char *url,
+                     const char **query_kv,
+                     long timeout_seconds,
+                     volatile int *cancel,
+                     audd_http_response_t *resp,
+                     char *errbuf,
+                     size_t errbuf_len);
+
+/* Sleep up to `ms`, returning early once the client is closed or `cancel`
+ * (may be NULL) is set. Returns 1 when the full wait passed, 0 when it was
+ * interrupted. */
+int audd_wait_ms(audd_client_t *client, volatile int *cancel, long ms);
+
+/*
  * Retry-driven request runner.
  *
  *   retries on the relevant set of failures based on `class`. The closure
@@ -149,6 +189,7 @@ struct audd_client {
     audd_options_t options;      /* immutable after create */
     char *user_agent;            /* heap — immutable after create */
     char *ca_bundle_path;        /* heap or NULL — immutable after create */
+    char *api_base;              /* heap or NULL — test hook, see below */
 
     /* last-error scratch state — guarded by `lock` */
     char *last_error_message;    /* heap or NULL */
@@ -160,11 +201,27 @@ struct audd_client {
      * data-race free. */
     pthread_mutex_t lock;
 
-    /* longpoll cancellation: shared "cancel" flag bumped from any thread.
-     * NOT a mutex-protected field — single producer, single consumer
-     * monotonic increment. Sufficient for cancellation signaling. */
-    volatile int closed;          /* client closed */
+    /* Set once by audd_client_close / audd_client_free; read with
+     * AUDD_FLAG_GET by every request (transfer progress callback, retry
+     * waits, longpoll loop). */
+    volatile int closed;
 };
+
+/* 1 once audd_client_close has been called on `client`. */
+int audd_client_is_closed(audd_client_t *client);
+
+/* Base URL for api.audd.io requests that go through it (streams, longpoll,
+ * custom catalog): "https://api.audd.io" unless the test suite pointed the
+ * client at a local server with audd_client_set_api_base_for_testing
+ * (call it before the client is used; NULL restores the default). */
+const char  *audd_client_api_base(const audd_client_t *client);
+audd_error_t audd_client_set_api_base_for_testing(audd_client_t *client,
+                                                  const char *base);
+
+/* The sentinel for a failed transport attempt: AUDD_ERR_CLOSED when the
+ * client was closed (the request was cancelled), AUDD_ERR_CONNECTION
+ * otherwise. */
+audd_error_t audd_transport_error(audd_client_t *client);
 
 void audd_client_set_error(audd_client_t *client,
                            const char *message,
@@ -200,6 +257,26 @@ int         audd_json_get_id(const cJSON *obj, const char *key, int *out);
 /* Get the printed JSON of `obj[key]` as a heap string ("string-quoted",
  * number, true/false, null, object, array). NULL if absent or OOM. */
 char *audd_json_print_field(const cJSON *obj, const char *key);
+
+/* Convert a JSON number to int64 without undefined behaviour: truncates
+ * toward zero; returns 0 for NaN, infinities and values outside int64. */
+int         audd_json_number_to_int64(double v, int64_t *out);
+/* As audd_json_number_to_int64, then clamps to the int range. */
+int         audd_json_number_to_int(double v);
+
+/* Lenient int64 read of a single node: a JSON number or a numeric string.
+ * Returns 1 and writes *out on success; 0 for anything else (bools,
+ * containers, junk strings, out-of-range numbers). */
+int         audd_json_node_to_int64(const cJSON *node, int64_t *out);
+
+/* AudD numeric code of an error body ({"error":{"error_code":N}}), or 0. */
+int         audd_response_error_code(const cJSON *body);
+
+/* The `*_extra(obj, key)` lookup: the unparsed JSON of raw[key], or NULL
+ * when raw is NULL, key is NULL, key is one of the NULL-terminated
+ * `typed_keys`, or raw has no such member. The printed text is cached
+ * inside `raw`, which owns it. */
+const char *audd_json_extra(cJSON *raw, const char *key, const char *const *typed_keys);
 
 /* Inspect "status" / "error" / "result" of a top-level response and return
  * an audd_error_t. On error, sets the client's last-error state. On 51 +
@@ -270,6 +347,17 @@ audd_error_t audd_parse_callback_internal(const char *body,
                                           audd_stream_callback_notification_t **out_notification,
                                           char **out_error);
 
+/* audd_streams_get_callback_url that also reports the AudD numeric code of
+ * a failure (0 when none) without going through the client's shared
+ * last-error state. */
+audd_error_t audd_streams_get_callback_url_ex(audd_client_t *client,
+                                              char **out_url,
+                                              int *out_code);
+
+/* AudD answers getCallbackUrl with this code when the account has no
+ * callback URL configured. */
+#define AUDD_NO_CALLBACK_URL_CODE 19
+
 /* ------------------------------------------------------------------ *
  * Longpoll classification helpers (shared with tests).                *
  * ------------------------------------------------------------------ */
@@ -291,6 +379,53 @@ audd_longpoll_action_t audd_longpoll_classify_http(int rc, long status);
  * so use max(standard_timeout_seconds, hold_timeout_seconds + margin). */
 long audd_longpoll_poll_timeout(long standard_timeout_seconds,
                                 int hold_timeout_seconds);
+
+/* Default pauses of the longpoll loop: after a response with nothing new in
+ * it, and after a transient failure, the loop waits START, then doubles the
+ * wait each time up to MAX. */
+#define AUDD_LONGPOLL_BACKOFF_START_MS 1000L
+#define AUDD_LONGPOLL_BACKOFF_MAX_MS   30000L
+
+/* The pause after `current`: doubled, capped at `max_ms`. */
+long audd_longpoll_next_backoff(long current, long max_ms);
+
+/* What one HTTP-2xx longpoll body yields. */
+typedef struct {
+    /* In: the since_time the request carried. Out: the next since_time. */
+    int64_t      since;
+    /* Out: 1 when the body delivered an event at the top level or moved
+     * `since`; 0 means "nothing new", and the loop waits before the next
+     * request. */
+    int          progressed;
+    /* Out: AUDD_OK, or the terminal error an error body carries. */
+    audd_error_t error;
+    /* Out: AudD numeric code of an error body; 0 when it carried none. */
+    int          error_code;
+    /* Out: the error body's message when error != AUDD_OK. */
+    char         error_message[1024];
+} audd_longpoll_page_t;
+
+/*
+ * Interpret one HTTP-2xx longpoll body and deliver its events through
+ * `callbacks`. `body`/`len` is the raw text and `json` its parse (NULL when
+ * the body isn't JSON). Delivery stops early once `handle` (may be NULL) or
+ * `client` (may be NULL) is closed. Never allocates the page; every
+ * allocation failure inside degrades to skipping the affected event.
+ * Exposed for the test suite.
+ */
+void audd_longpoll_process_body(const char *body,
+                                size_t len,
+                                const cJSON *json,
+                                const audd_longpoll_callbacks_t *callbacks,
+                                audd_longpoll_t *handle,
+                                audd_client_t *client,
+                                audd_longpoll_page_t *page);
+
+/* Test hook for a handle from audd_longpoll_new: the backoff bounds in
+ * milliseconds (values <= 0 keep the defaults). */
+void audd_longpoll_set_backoff_for_testing(audd_longpoll_t *handle,
+                                           long start_ms,
+                                           long max_ms);
 
 /* ------------------------------------------------------------------ *
  * URL helpers                                                          *

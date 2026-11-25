@@ -244,7 +244,7 @@ static int parse_musicbrainz(const cJSON *arr, struct audd_musicbrainz_list *out
             if (cJSON_IsString(score)) {
                 e->score = audd_strdup(score->valuestring);
             } else if (cJSON_IsNumber(score)) {
-                e->score = audd_aprintf("%d", (int)score->valuedouble);
+                e->score = audd_aprintf("%d", audd_json_number_to_int(score->valuedouble));
             }
         }
         out->count++;
@@ -427,16 +427,18 @@ const char *audd_recognition_thumbnail_url(audd_recognition_t *r)
     return r->thumbnail_url;
 }
 
-static const char *provider_name(audd_provider_t p)
+/* The lis.tn `?<key>` redirect key for a provider; NULL when lis.tn has no
+ * redirect for it. */
+static const char *lis_tn_key(audd_provider_t p)
 {
     switch (p) {
     case AUDD_PROVIDER_SPOTIFY: return "spotify";
-    case AUDD_PROVIDER_APPLE_MUSIC: return "apple_music";
+    case AUDD_PROVIDER_APPLE_MUSIC: return "apple";
     case AUDD_PROVIDER_DEEZER: return "deezer";
-    case AUDD_PROVIDER_NAPSTER: return "napster";
+    case AUDD_PROVIDER_NAPSTER: return NULL;
     case AUDD_PROVIDER_YOUTUBE: return "youtube";
     }
-    return "";
+    return NULL;
 }
 
 static char *direct_streaming_url(const audd_recognition_t *r, audd_provider_t p)
@@ -483,8 +485,9 @@ const char *audd_recognition_streaming_url(audd_recognition_t *r, audd_provider_
         return direct;
     }
     audd_free(direct);
-    if (song_link_is_lis_tn(r->song_link)) {
-        r->streaming_urls[p] = append_qparam(r->song_link, provider_name(p));
+    const char *key = lis_tn_key(p);
+    if (key != NULL && song_link_is_lis_tn(r->song_link)) {
+        r->streaming_urls[p] = append_qparam(r->song_link, key);
         return r->streaming_urls[p];
     }
     return NULL;
@@ -894,7 +897,7 @@ static audd_error_t do_recognize_common(audd_client_t *client,
     audd_free(return_csv);
     if (rc != 0) {
         audd_http_response_free(&resp);
-        return AUDD_ERR_CONNECTION;
+        return audd_transport_error(client);
     }
     audd_error_t derr = audd_decode_or_raise(client, &resp, 0);
     if (derr != AUDD_OK) {

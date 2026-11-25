@@ -73,10 +73,12 @@ void test_streaming_url_lis_tn_redirect(void)
     audd_recognition_t *r = parse_recognition("{\"song_link\":\"https://lis.tn/abc\"}");
     TEST_ASSERT_EQUAL_STRING("https://lis.tn/abc?spotify",
         audd_recognition_streaming_url(r, AUDD_PROVIDER_SPOTIFY));
-    TEST_ASSERT_EQUAL_STRING("https://lis.tn/abc?apple_music",
+    TEST_ASSERT_EQUAL_STRING("https://lis.tn/abc?apple",
         audd_recognition_streaming_url(r, AUDD_PROVIDER_APPLE_MUSIC));
     TEST_ASSERT_EQUAL_STRING("https://lis.tn/abc?youtube",
         audd_recognition_streaming_url(r, AUDD_PROVIDER_YOUTUBE));
+    /* lis.tn has no Napster redirect. */
+    TEST_ASSERT_NULL(audd_recognition_streaming_url(r, AUDD_PROVIDER_NAPSTER));
     audd_recognition_free(r);
 }
 

@@ -91,9 +91,37 @@ static const char *user_agent_for(audd_client_t *client)
     return client->user_agent != NULL ? client->user_agent : "audd-c";
 }
 
+/* What the transfer progress callback checks: the client's closed flag and,
+ * for a longpoll request, the subscription's own flag. */
+typedef struct {
+    audd_client_t *client;
+    volatile int  *cancel; /* may be NULL */
+} cancel_ctx_t;
+
+static int cancel_requested(const cancel_ctx_t *c)
+{
+    if (audd_client_is_closed(c->client)) return 1;
+    return c->cancel != NULL && AUDD_FLAG_GET(c->cancel) != 0;
+}
+
+/* libcurl calls this at least about once a second during a transfer, also
+ * while it waits for the response; a non-zero return aborts the transfer. */
+#if LIBCURL_VERSION_NUM >= 0x072000 /* 7.32.0: CURLOPT_XFERINFOFUNCTION */
+static int progress_cb(void *userdata, curl_off_t dltotal, curl_off_t dlnow,
+                       curl_off_t ultotal, curl_off_t ulnow)
+#else
+static int progress_cb(void *userdata, double dltotal, double dlnow,
+                       double ultotal, double ulnow)
+#endif
+{
+    (void)dltotal; (void)dlnow; (void)ultotal; (void)ulnow;
+    return cancel_requested((const cancel_ctx_t *)userdata);
+}
+
 /* Configure common options on a curl handle. */
 static void apply_common_opts(audd_client_t *client, CURL *eh, long timeout_seconds,
-                              buf_t *body, char **request_id_out)
+                              buf_t *body, char **request_id_out,
+                              cancel_ctx_t *cancel)
 {
     curl_easy_setopt(eh, CURLOPT_USERAGENT, user_agent_for(client));
     curl_easy_setopt(eh, CURLOPT_FOLLOWLOCATION, 1L);
@@ -108,6 +136,25 @@ static void apply_common_opts(audd_client_t *client, CURL *eh, long timeout_seco
         curl_easy_setopt(eh, CURLOPT_CAINFO, client->ca_bundle_path);
     }
     curl_easy_setopt(eh, CURLOPT_TCP_KEEPALIVE, 1L);
+    curl_easy_setopt(eh, CURLOPT_NOPROGRESS, 0L);
+#if LIBCURL_VERSION_NUM >= 0x072000
+    curl_easy_setopt(eh, CURLOPT_XFERINFOFUNCTION, progress_cb);
+    curl_easy_setopt(eh, CURLOPT_XFERINFODATA, cancel);
+#else
+    curl_easy_setopt(eh, CURLOPT_PROGRESSFUNCTION, progress_cb);
+    curl_easy_setopt(eh, CURLOPT_PROGRESSDATA, cancel);
+#endif
+}
+
+/* The error message for a failed transfer. Never includes the URL. */
+static char *transfer_error_message(const cancel_ctx_t *cancel, CURLcode rc)
+{
+    if (rc == CURLE_ABORTED_BY_CALLBACK && cancel_requested(cancel)) {
+        return audd_aprintf("%s", audd_client_is_closed(cancel->client)
+                                      ? "audd: client closed"
+                                      : "audd: longpoll closed");
+    }
+    return audd_aprintf("audd: connection error: %s", curl_easy_strerror(rc));
 }
 
 int audd_failure_is_pre_upload(int curl_code,
@@ -179,7 +226,8 @@ int audd_http_post(audd_client_t *client,
 
     buf_t body = {0};
     char *request_id = NULL;
-    apply_common_opts(client, eh, timeout_seconds, &body, &request_id);
+    cancel_ctx_t cancel = { client, NULL };
+    apply_common_opts(client, eh, timeout_seconds, &body, &request_id, &cancel);
     curl_easy_setopt(eh, CURLOPT_URL, url);
     curl_easy_setopt(eh, CURLOPT_POST, 1L);
 
@@ -237,7 +285,7 @@ int audd_http_post(audd_client_t *client,
         if (body_was_uploaded) {
             *body_was_uploaded = perform_failed_before_upload(eh, rc, status) ? 0 : 1;
         }
-        char *msg = audd_aprintf("audd: connection error: %s", curl_easy_strerror(rc));
+        char *msg = transfer_error_message(&cancel, rc);
         audd_client_set_error(client, msg ? msg : "connection error", 0);
         audd_free(msg);
         audd_realloc_free(body.data);
@@ -265,6 +313,30 @@ int audd_http_get(audd_client_t *client,
                   long timeout_seconds,
                   audd_http_response_t *resp)
 {
+    return audd_http_get_ex(client, url, query_kv, timeout_seconds, NULL, resp, NULL, 0);
+}
+
+/* Record a GET failure: into the client's last-error state and, when given,
+ * into errbuf. */
+static void get_failed(audd_client_t *client, const char *msg,
+                       char *errbuf, size_t errbuf_len)
+{
+    audd_client_set_error(client, msg, 0);
+    if (errbuf != NULL && errbuf_len > 0) {
+        snprintf(errbuf, errbuf_len, "%s", msg);
+    }
+}
+
+int audd_http_get_ex(audd_client_t *client,
+                     const char *url,
+                     const char **query_kv,
+                     long timeout_seconds,
+                     volatile int *cancel_flag,
+                     audd_http_response_t *resp,
+                     char *errbuf,
+                     size_t errbuf_len)
+{
+    if (errbuf != NULL && errbuf_len > 0) errbuf[0] = '\0';
     if (client == NULL || url == NULL || resp == NULL) return -1;
     memset(resp, 0, sizeof(*resp));
 
@@ -277,14 +349,14 @@ int audd_http_get(audd_client_t *client,
         }
         full_url = (char *)audd_malloc(total + 16);
         if (full_url == NULL) {
-            audd_client_set_error(client, "out of memory", 0);
+            get_failed(client, "audd: out of memory", errbuf, errbuf_len);
             return -1;
         }
         /* One curl handle for all escapes in this build. */
         CURL *esc = curl_easy_init();
         if (esc == NULL) {
             audd_free(full_url);
-            audd_client_set_error(client, "curl_easy_init failed", 0);
+            get_failed(client, "audd: curl_easy_init failed", errbuf, errbuf_len);
             return -1;
         }
         size_t off = 0;
@@ -299,7 +371,7 @@ int audd_http_get(audd_client_t *client,
                 curl_free(kk); curl_free(vv);
                 curl_easy_cleanup(esc);
                 audd_free(full_url);
-                audd_client_set_error(client, "curl_easy_escape failed", 0);
+                get_failed(client, "audd: curl_easy_escape failed", errbuf, errbuf_len);
                 return -1;
             }
             if (!first) full_url[off++] = '&';
@@ -315,7 +387,7 @@ int audd_http_get(audd_client_t *client,
     } else {
         full_url = audd_strdup(url);
         if (full_url == NULL) {
-            audd_client_set_error(client, "out of memory", 0);
+            get_failed(client, "audd: out of memory", errbuf, errbuf_len);
             return -1;
         }
     }
@@ -323,12 +395,13 @@ int audd_http_get(audd_client_t *client,
     CURL *eh = curl_easy_init();
     if (eh == NULL) {
         audd_free(full_url);
-        audd_client_set_error(client, "curl_easy_init failed", 0);
+        get_failed(client, "audd: curl_easy_init failed", errbuf, errbuf_len);
         return -1;
     }
     buf_t body = {0};
     char *request_id = NULL;
-    apply_common_opts(client, eh, timeout_seconds, &body, &request_id);
+    cancel_ctx_t cancel = { client, cancel_flag };
+    apply_common_opts(client, eh, timeout_seconds, &body, &request_id, &cancel);
     curl_easy_setopt(eh, CURLOPT_URL, full_url);
     curl_easy_setopt(eh, CURLOPT_HTTPGET, 1L);
 
@@ -336,8 +409,8 @@ int audd_http_get(audd_client_t *client,
     long status = 0;
     curl_easy_getinfo(eh, CURLINFO_RESPONSE_CODE, &status);
     if (rc != CURLE_OK) {
-        char *msg = audd_aprintf("audd: connection error: %s", curl_easy_strerror(rc));
-        audd_client_set_error(client, msg ? msg : "connection error", 0);
+        char *msg = transfer_error_message(&cancel, rc);
+        get_failed(client, msg ? msg : "audd: connection error", errbuf, errbuf_len);
         audd_free(msg);
         audd_realloc_free(body.data);
         audd_free(request_id);
@@ -369,6 +442,22 @@ static void sleep_ms(long ms)
     ts.tv_sec = ms / 1000;
     ts.tv_nsec = (long)(ms % 1000) * 1000000L;
     nanosleep(&ts, NULL);
+}
+
+/* Longest single sleep inside an interruptible wait, so a close takes effect
+ * within this many milliseconds. */
+static const long kWaitSliceMs = 50;
+
+int audd_wait_ms(audd_client_t *client, volatile int *cancel, long ms)
+{
+    for (;;) {
+        if (audd_client_is_closed(client)) return 0;
+        if (cancel != NULL && AUDD_FLAG_GET(cancel) != 0) return 0;
+        if (ms <= 0) return 1;
+        long slice = ms < kWaitSliceMs ? ms : kWaitSliceMs;
+        sleep_ms(slice);
+        ms -= slice;
+    }
 }
 
 /* Should we retry given (attempt outcome, class)?
@@ -413,18 +502,24 @@ int audd_retry_do(audd_client_t *client,
     long backoff_ms = client->options.backoff_ms > 0 ? client->options.backoff_ms : 500;
 
     for (int attempt_n = 1; attempt_n <= max_attempts; ++attempt_n) {
-        if (client->closed) {
-            audd_client_set_error(client, "client closed", 0);
+        if (audd_client_is_closed(client)) {
+            audd_client_set_error(client, "audd: client closed", 0);
             return -1;
         }
         audd_http_response_free(resp);
         int body_uploaded = 1;
         int rc = attempt(client, resp, &body_uploaded, ud);
+        if (rc != 0 && audd_client_is_closed(client)) {
+            audd_client_set_error(client, "audd: client closed", 0);
+            return -1;
+        }
         if (attempt_n == max_attempts) return rc;
         if (!should_retry(class, rc, resp->status, body_uploaded)) {
             return rc;
         }
-        sleep_ms(backoff_ms * (long)(1 << (attempt_n - 1)));
+        /* An interrupted wait means the client was closed: the next
+         * iteration reports it. */
+        (void)audd_wait_ms(client, NULL, backoff_ms * (long)(1 << (attempt_n - 1)));
     }
     return 0;
 }

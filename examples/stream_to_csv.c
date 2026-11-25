@@ -14,6 +14,8 @@ typedef struct {
     FILE *out;
 } ctx_t;
 
+/* Created before the signal handler is installed and freed after the run
+ * returns, so the handler can always close it. */
 static audd_longpoll_t *g_handle;
 
 static void csv_quote(FILE *f, const char *s)
@@ -42,7 +44,7 @@ static void on_match(const audd_stream_callback_match_t *m, void *ud)
 static void on_error(audd_error_t err, const char *msg, void *ud)
 {
     (void)ud;
-    fprintf(stderr, "error: %s — %s\n", audd_error_string(err), msg);
+    fprintf(stderr, "longpoll stopped: %s — %s\n", audd_error_string(err), msg);
 }
 
 static void on_sigint(int sig) { (void)sig; audd_longpoll_close(g_handle); }
@@ -62,16 +64,16 @@ int main(int argc, char **argv)
     audd_client_t *client = audd_client_new(NULL, NULL);
     if (client == NULL) { fclose(out); return 1; }
 
-    char category[10];
-    if (audd_streams_derive_longpoll_category(client, radio_id, category) != AUDD_OK) {
-        fprintf(stderr, "%s\n", audd_last_error_message(client));
-        audd_client_free(client); fclose(out); return 1;
-    }
+    g_handle = audd_longpoll_new();
+    if (g_handle == NULL) { audd_client_free(client); fclose(out); return 1; }
 
     ctx_t ctx = { out };
     audd_longpoll_callbacks_t cb = { on_match, NULL, on_error, &ctx };
     signal(SIGINT, on_sigint);
-    audd_error_t e = audd_longpoll_run(client, category, NULL, &cb, &g_handle);
+    audd_error_t e = audd_longpoll_run_by_radio_id_with_handle(g_handle, client, radio_id,
+                                                               NULL, &cb);
+    signal(SIGINT, SIG_DFL);
+    audd_longpoll_free(g_handle);
     audd_client_free(client);
     fclose(out);
     return e == AUDD_OK ? 0 : 1;

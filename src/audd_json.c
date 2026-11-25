@@ -11,6 +11,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,7 +27,9 @@
  * decimal point ("85"), doubles render naturally ("8.5"). Writes into buf. */
 static void render_number(double v, char *buf, size_t buflen)
 {
-    if (v == (double)(long long)v && fabs(v) < 1e18) {
+    /* Range check first: casting a NaN, an infinity or an out-of-range
+     * double to an integer is undefined behaviour. */
+    if (fabs(v) < 1e18 && v == (double)(long long)v) {
         snprintf(buf, buflen, "%lld", (long long)v);
     } else {
         snprintf(buf, buflen, "%.17g", v);
@@ -70,6 +73,27 @@ static int looks_like_plain_decimal(const char *s)
     return 1;
 }
 
+/* 2^63 as a double: the first value past the int64 range. */
+static const double kInt64Bound = 9223372036854775808.0;
+
+int audd_json_number_to_int64(double v, int64_t *out)
+{
+    /* NaN fails both comparisons; casting an out-of-range double to an
+     * integer is undefined behaviour, so reject those before the cast. */
+    if (!(v > -kInt64Bound && v < kInt64Bound)) return 0;
+    *out = (int64_t)v; /* truncate toward zero */
+    return 1;
+}
+
+int audd_json_number_to_int(double v)
+{
+    int64_t i = 0;
+    if (!audd_json_number_to_int64(v, &i)) return 0;
+    if (i > INT_MAX) return INT_MAX;
+    if (i < INT_MIN) return INT_MIN;
+    return (int)i;
+}
+
 /* Full-string strict parse of a numeric string into an int64. Returns 1 on
  * success, 0 if not fully convertible. Accepts "85"; "8.9" truncates to 8. */
 static int parse_int_string(const char *s, int64_t *out)
@@ -82,6 +106,7 @@ static int parse_int_string(const char *s, int64_t *out)
     errno = 0;
     long long ll = strtoll(trimmed, &end, 10);
     if (end != trimmed && *end == '\0') {
+        if (errno == ERANGE) return 0;
         *out = (int64_t)ll;
         return 1;
     }
@@ -89,10 +114,31 @@ static int parse_int_string(const char *s, int64_t *out)
     end = NULL;
     double d = strtod(trimmed, &end);
     if (end != trimmed && *end == '\0' && isfinite(d)) {
-        *out = (int64_t)d; /* truncate toward zero */
-        return 1;
+        return audd_json_number_to_int64(d, out);
     }
     return 0;
+}
+
+int audd_json_node_to_int64(const cJSON *node, int64_t *out)
+{
+    if (node == NULL || out == NULL) return 0;
+    if (cJSON_IsNumber(node)) return audd_json_number_to_int64(node->valuedouble, out);
+    if (cJSON_IsString(node) && node->valuestring != NULL) {
+        return parse_int_string(node->valuestring, out);
+    }
+    return 0;
+}
+
+int audd_response_error_code(const cJSON *body)
+{
+    const cJSON *err = cJSON_GetObjectItemCaseSensitive(body, "error");
+    if (!cJSON_IsObject(err)) return 0;
+    int64_t code = 0;
+    if (!audd_json_node_to_int64(cJSON_GetObjectItemCaseSensitive(err, "error_code"), &code)) {
+        return 0;
+    }
+    if (code > INT_MAX || code < INT_MIN) return 0;
+    return (int)code;
 }
 
 /* Full-string strict parse of a numeric string into a double. */
@@ -180,7 +226,10 @@ int64_t audd_json_get_int64(const cJSON *obj, const char *key, int64_t def)
     if (obj == NULL) return def;
     cJSON *it = cJSON_GetObjectItemCaseSensitive(obj, key);
     if (it == NULL) return def;
-    if (cJSON_IsNumber(it)) return (int64_t)it->valuedouble; /* truncate toward 0 */
+    if (cJSON_IsNumber(it)) {
+        int64_t v = 0;
+        return audd_json_number_to_int64(it->valuedouble, &v) ? v : def;
+    }
     if (cJSON_IsBool(it)) return cJSON_IsTrue(it) ? 1 : 0;
     if (cJSON_IsString(it)) {
         int64_t v = 0;
@@ -208,18 +257,10 @@ int audd_json_get_id(const cJSON *obj, const char *key, int *out)
     if (obj == NULL || out == NULL) return 0;
     cJSON *it = cJSON_GetObjectItemCaseSensitive(obj, key);
     if (it == NULL) return 0;
-    if (cJSON_IsNumber(it)) {
-        *out = (int)it->valuedouble; /* truncate toward 0 */
-        return 1;
-    }
-    if (cJSON_IsString(it)) {
-        int64_t v = 0;
-        if (parse_int_string(it->valuestring, &v)) {
-            *out = (int)v;
-            return 1;
-        }
-    }
-    return 0;
+    int64_t v = 0;
+    if (!audd_json_node_to_int64(it, &v) || v > INT_MAX || v < INT_MIN) return 0;
+    *out = (int)v; /* truncated toward 0 */
+    return 1;
 }
 
 int audd_json_has(const cJSON *obj, const char *key)
@@ -236,6 +277,28 @@ int audd_json_get_bool(const cJSON *obj, const char *key, int def)
     if (cJSON_IsNumber(it)) return it->valuedouble != 0.0;
     if (cJSON_IsString(it)) return parse_bool_string(it->valuestring, def);
     return def;
+}
+
+const char *audd_json_extra(cJSON *raw, const char *key, const char *const *typed_keys)
+{
+    if (raw == NULL || key == NULL) return NULL;
+    for (size_t i = 0; typed_keys != NULL && typed_keys[i] != NULL; ++i) {
+        if (strcmp(typed_keys[i], key) == 0) return NULL;
+    }
+    const cJSON *it = cJSON_GetObjectItemCaseSensitive(raw, key);
+    if (it == NULL) return NULL;
+    char *aux = audd_aprintf("_audd_extra_%s", key);
+    if (aux == NULL) return NULL;
+    const cJSON *cached = cJSON_GetObjectItemCaseSensitive(raw, aux);
+    if (cJSON_IsString(cached) && cached->valuestring != NULL) {
+        audd_free(aux);
+        return cached->valuestring;
+    }
+    char *printed = cJSON_PrintUnformatted(it);
+    const cJSON *added = printed ? cJSON_AddStringToObject(raw, aux, printed) : NULL;
+    audd_free(printed);
+    audd_free(aux);
+    return cJSON_IsString(added) ? added->valuestring : NULL;
 }
 
 char *audd_json_print_field(const cJSON *obj, const char *key)
@@ -263,8 +326,7 @@ static void maybe_warn_and_strip(audd_client_t *client, cJSON *body)
 {
     cJSON *err = cJSON_GetObjectItemCaseSensitive(body, "error");
     if (!cJSON_IsObject(err)) return;
-    cJSON *code = cJSON_GetObjectItemCaseSensitive(err, "error_code");
-    if (!cJSON_IsNumber(code) || (int)code->valuedouble != kDeprecatedParamsCode) {
+    if (audd_response_error_code(body) != kDeprecatedParamsCode) {
         return;
     }
     cJSON *result = cJSON_GetObjectItemCaseSensitive(body, "result");
@@ -309,11 +371,9 @@ audd_error_t audd_decode_or_raise(audd_client_t *client,
     }
     if (strcmp(status_str, "error") == 0) {
         cJSON *err = cJSON_GetObjectItemCaseSensitive(body, "error");
-        int code = 0;
+        int code = audd_response_error_code(body);
         const char *msg = "";
         if (cJSON_IsObject(err)) {
-            cJSON *c = cJSON_GetObjectItemCaseSensitive(err, "error_code");
-            if (cJSON_IsNumber(c)) code = (int)c->valuedouble;
             const char *m = audd_json_get_string(err, "error_message");
             if (m) msg = m;
         }

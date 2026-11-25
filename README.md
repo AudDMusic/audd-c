@@ -27,7 +27,7 @@ Drop the SDK into your CMake project via `FetchContent`:
 include(FetchContent)
 FetchContent_Declare(audd
     GIT_REPOSITORY https://github.com/AudDMusic/audd-c.git
-    GIT_TAG        v1.5.18
+    GIT_TAG        v1.5.19
 )
 FetchContent_MakeAvailable(audd)
 
@@ -115,7 +115,7 @@ for (size_t i = 0; i < audd_enterprise_result_count(r); ++i) {
 audd_enterprise_result_free(r);
 ```
 
-Requires a C99 compiler.
+Requires a C99 compiler on a POSIX system (Linux, macOS).
 
 ## Authentication
 
@@ -202,10 +202,10 @@ when the corresponding block wasn't requested or wasn't returned.
 
 ### Reading additional metadata
 
-Every result, every metadata block, and every match has typed accessors
-plus a generic `*_extra(obj, "key")` escape hatch that returns the field's
-unparsed JSON. Use it to read fields outside the typed surface
-as typed properties:
+Recognition results, enterprise and stream-callback matches, and the Apple
+Music, Spotify and Deezer blocks have typed accessors plus a generic
+`*_extra(obj, "key")` escape hatch that returns the field's unparsed JSON.
+Use it to read fields outside the typed surface:
 
 ```c
 const char *song_length_json = audd_recognition_extra(r, "song_length");
@@ -267,7 +267,12 @@ Sentinels: `AUDD_ERR_AUTHENTICATION`, `AUDD_ERR_QUOTA`,
 `AUDD_ERR_RATE_LIMIT`, `AUDD_ERR_STREAM_LIMIT`,
 `AUDD_ERR_NOT_RELEASED`, `AUDD_ERR_BLOCKED`, `AUDD_ERR_NEEDS_UPDATE`,
 `AUDD_ERR_SERVER`, `AUDD_ERR_CONNECTION`, `AUDD_ERR_SERIALIZATION`,
-`AUDD_ERR_INVALID_ARGUMENT`, `AUDD_ERR_OUT_OF_MEMORY`.
+`AUDD_ERR_INVALID_ARGUMENT`, `AUDD_ERR_OUT_OF_MEMORY`, `AUDD_ERR_IO`,
+`AUDD_ERR_CLOSED`, `AUDD_ERR_NOT_FOUND`.
+
+`audd_streams_add` returns `AUDD_ERR_STREAM_LIMIT` when the account is at
+its stream limit (the API answers 610, or 902 for this call); elsewhere 902
+is `AUDD_ERR_QUOTA`.
 
 ## Configuration
 
@@ -290,6 +295,8 @@ Retries are cost-aware:
   failures (DNS, TCP dial). Post-upload errors are not retried — the
   server may have already done the metered work.
 - Mutating endpoints retry only on pre-upload connection failures.
+- Custom-catalog uploads are never retried automatically (see
+  [Custom catalog](#custom-catalog-advanced)).
 
 ### Plugging in a custom allocator
 
@@ -305,8 +312,8 @@ audd_allocator_t alloc = {
 audd_set_allocator(&alloc);
 ```
 
-Pass `NULL` to restore the libc defaults. The same hooks are wired
-through to the bundled cJSON parser — no allocations leak out.
+Pass `NULL` to restore the libc defaults. The same hooks also serve the
+bundled cJSON parser; libcurl keeps its own allocator.
 
 ## Streams
 
@@ -374,28 +381,54 @@ and [`examples/streams_setup.c`](examples/streams_setup.c) for runnable code.
 ### Receiving events without a callback URL (longpoll)
 
 If hosting a callback receiver isn't an option, longpoll for events
-from the client side. C is synchronous, so the consumer is built around
-three callbacks plus a blocking call:
+from the client side. The consumer runs on the calling thread and reports
+through callbacks; a handle you create lets another thread or a signal
+handler stop it:
 
 ```c
+static audd_longpoll_t *lp;
+
+static void on_sigint(int sig) { audd_longpoll_close(lp); } /* signal-safe */
+
+/* … */
 int radio_id = 1; /* any integer you choose — your handle for this stream */
 
+lp = audd_longpoll_new();
 audd_longpoll_callbacks_t cb = {
     .on_match        = on_match,
     .on_notification = on_notification,
     .on_error        = on_error,
     .user_data       = my_state,
 };
-audd_longpoll_t *handle = NULL;
-audd_longpoll_run_by_radio_id(client, radio_id, NULL, &cb, &handle);
-/* blocks until on_error fires or audd_longpoll_close(handle) is called
-   from another thread. */
+signal(SIGINT, on_sigint);
+audd_error_t e = audd_longpoll_run_by_radio_id_with_handle(lp, client, radio_id,
+                                                           NULL, &cb);
+/* Blocks. AUDD_OK after audd_longpoll_close; otherwise the error that
+   on_error received. */
+signal(SIGINT, SIG_DFL);
+audd_longpoll_free(lp);
 ```
 
-`audd_derive_longpoll_category(token, radio_id, out)` is also available
-as a free function for computing categories on a server and shipping them
-to a frontend that consumes the longpoll stream — no api_token leaves
-the server.
+Events arrive in order, and each poll asks only for events newer than the
+last one. Network failures and HTTP 408, 429 and 5xx responses are retried
+after a pause that grows from 1 to 30 seconds, up to 8 in a row;
+`audd_longpoll_set_on_retry(lp, fn)` reports each one. The next failure, or
+a request the server rejects (for example a `timeout` outside 1–120
+seconds), ends the run through `on_error`, which fires once.
+`audd_longpoll_close` also interrupts a waiting request, within about a
+second.
+
+Longpoll delivers events only when the account has a callback URL
+configured; if you have no receiver, set `https://audd.tech/empty/`, which
+discards the POSTs. The run checks this first and ends with
+`AUDD_ERR_INVALID_REQUEST` when none is set (`opts.skip_callback_check = 1`
+skips the check).
+
+`audd_derive_longpoll_category(token, radio_id, out)` computes a stream's
+category on a server, so you can ship it to a consumer that never holds the
+api_token. That consumer builds a client without a token and passes the
+category to `audd_longpoll_run_with_handle(lp, consumer, category, NULL, &cb)`;
+longpoll requests carry no token.
 
 ## Custom catalog (advanced)
 
@@ -408,7 +441,12 @@ the server.
 
 ```c
 audd_custom_catalog_add(client, /*audio_id=*/42, "/path/to/track.mp3");
+audd_custom_catalog_add(client, /*audio_id=*/43, "https://example.com/track.mp3");
 ```
+
+The upload is sent once and never retried automatically: check the error
+before sending it again (an upload to an `audio_id` that already holds a
+song replaces it).
 
 Custom-catalog access requires a separate subscription. Contact
 api@audd.io to get it enabled.
@@ -436,6 +474,11 @@ audd_string_free(response_json);
 - `audd_string_free` releases heap strings returned by accessors that
   explicitly hand off ownership (`audd_streams_get_callback_url`,
   `audd_advanced_raw_request`). It's NULL-safe.
+- One client can be shared across threads. `audd_client_free` must not run
+  while another thread is still using the client: to stop calls running
+  elsewhere, call `audd_client_close(client)` (they return
+  `AUDD_ERR_CLOSED`, or `AUDD_OK` for a longpoll), wait for those threads to
+  return, then free it.
 
 ## License & support
 

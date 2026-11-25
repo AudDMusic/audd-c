@@ -21,6 +21,9 @@ set(AUDD_TEST_FILES
     test_alloc_emulation.c
     test_enterprise_oom.c
     test_concurrency.c
+    test_longpoll_events.c
+    test_longpoll_http.c
+    test_client_close.c
 )
 
 foreach(t ${AUDD_TEST_FILES})
@@ -36,8 +39,11 @@ foreach(t ${AUDD_TEST_FILES})
         target_include_directories(${name} PRIVATE ${CURL_INCLUDE_DIRS})
     endif()
     target_compile_features(${name} PRIVATE c_std_99)
+    target_compile_definitions(${name} PRIVATE
+        AUDD_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
     if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
         target_compile_options(${name} PRIVATE -Wall -Wextra -Wno-unused-parameter)
     endif()
     add_test(NAME ${name} COMMAND ${name})
+    set_tests_properties(${name} PROPERTIES TIMEOUT 120)
 endforeach()

@@ -58,7 +58,7 @@ audd_error_t audd_advanced_find_lyrics(audd_client_t *client,
     adv_ctx_t ctx = { "findLyrics", kv };
     audd_http_response_t resp = {0};
     int rc = audd_retry_do(client, AUDD_RETRY_RECOGNITION, adv_attempt, &ctx, &resp);
-    if (rc != 0) { audd_http_response_free(&resp); return AUDD_ERR_CONNECTION; }
+    if (rc != 0) { audd_http_response_free(&resp); return audd_transport_error(client); }
     audd_error_t e = audd_decode_or_raise(client, &resp, 0);
     if (e != AUDD_OK) { audd_http_response_free(&resp); return e; }
 
@@ -140,7 +140,7 @@ audd_error_t audd_advanced_raw_request(audd_client_t *client,
     adv_ctx_t ctx = { method, params_kv };
     audd_http_response_t resp = {0};
     int rc = audd_retry_do(client, AUDD_RETRY_RECOGNITION, adv_attempt, &ctx, &resp);
-    if (rc != 0) { audd_http_response_free(&resp); return AUDD_ERR_CONNECTION; }
+    if (rc != 0) { audd_http_response_free(&resp); return audd_transport_error(client); }
     audd_error_t e = audd_decode_top_level(client, &resp);
     if (e != AUDD_OK) { audd_http_response_free(&resp); return e; }
     if (resp.body) {

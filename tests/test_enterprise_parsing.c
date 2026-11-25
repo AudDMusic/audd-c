@@ -47,6 +47,10 @@ void test_thumbnail_url(void)
         audd_enterprise_match_thumbnail_url(m));
     TEST_ASSERT_EQUAL_STRING("https://lis.tn/abc?spotify",
         audd_enterprise_match_streaming_url(m, AUDD_PROVIDER_SPOTIFY));
+    TEST_ASSERT_EQUAL_STRING("https://lis.tn/abc?apple",
+        audd_enterprise_match_streaming_url(m, AUDD_PROVIDER_APPLE_MUSIC));
+    /* lis.tn has no Napster redirect. */
+    TEST_ASSERT_NULL(audd_enterprise_match_streaming_url(m, AUDD_PROVIDER_NAPSTER));
     audd_enterprise_result_free(r);
 }
 
